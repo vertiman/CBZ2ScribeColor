@@ -51,6 +51,34 @@ If Calibre is installed somewhere unusual, pass the full `calibre-debug` path wi
 
 ## Install
 
+Install the command globally from npm:
+
+```bash
+npm install --global cbz2scribecolor
+cbz2scribe --help
+```
+
+The installed package also provides `cbz2scribecolor` as an alias for `cbz2scribe`.
+
+### Run without installing
+
+Use `npx` to download and run the current release without installing it globally:
+
+```bash
+npx cbz2scribecolor "D:\Comics\Issue 001.cbz"
+```
+
+> [!NOTE]
+> `npx` supplies only the CBZ2ScribeColor Node.js command. You still need Node.js 22.5 or newer, Calibre, the KFX Output plugin installed in Calibre, and Kindle Previewer 3. Ensure `calibre-debug` is discoverable in a standard Calibre installation or on `PATH`; otherwise pass `--calibre-debug <path>` or set `CALIBRE_DEBUG_PATH`.
+
+Pass CLI options after the input path in the same way as a global installation:
+
+```bash
+npx cbz2scribecolor "D:\Comics" --output "D:\Kindle Comics" --recursive
+```
+
+### Build from source
+
 ```bash
 git clone https://github.com/vertiman/CBZ2ScribeColor.git
 cd CBZ2ScribeColor
@@ -64,7 +92,7 @@ Run the compiled CLI directly:
 node dist/cli.js --help
 ```
 
-Or register the `cbz2scribe` command locally:
+Or register the `cbz2scribe` command from the source checkout:
 
 ```bash
 npm link

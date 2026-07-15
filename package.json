@@ -12,17 +12,28 @@
   },
   "homepage": "https://github.com/vertiman/CBZ2ScribeColor#readme",
   "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
   "bin": {
-    "cbz2scribe": "dist/cli.js"
+    "cbz2scribe": "dist/cli.js",
+    "cbz2scribecolor": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "start": "node dist/cli.js",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
     "node": ">=22.5"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "cbz",

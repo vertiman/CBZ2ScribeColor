@@ -2,17 +2,20 @@ import { mkdir } from "node:fs/promises";
 import { basename, dirname, extname, resolve } from "node:path";
 import AdmZip from "adm-zip";
 import sharp from "sharp";
+import { encodeJpegli } from "./jpegli.js";
 import { createComicKpf, type KpfPage } from "./kindle-kpf.js";
 
 export const SCRIBE_COLORSOFT_WIDTH = 1986;
 export const SCRIBE_COLORSOFT_HEIGHT = 2648;
 
 export type ReadingDirection = "ltr" | "rtl";
+export type PageJpegEncoder = "mozjpeg" | "jpegli" | "legacy";
 
 export interface CbzOptions {
   direction?: ReadingDirection | "auto";
   wideRatio?: number;
-  mozjpeg?: boolean;
+  jpegEncoder?: PageJpegEncoder;
+  cjpegliPath?: string;
 }
 
 export interface BookMetadata {
@@ -87,7 +90,11 @@ export async function createKpfFromCbz(
   options: CbzOptions = {},
 ): Promise<ConversionPlan> {
   const inspection = await inspectCbz(resolve(inputPath), options);
-  const pages = await preparePages(inspection, options.mozjpeg ?? true);
+  const jpegEncoder = options.jpegEncoder ?? "mozjpeg";
+  if (!["mozjpeg", "jpegli", "legacy"].includes(jpegEncoder)) {
+    throw new Error(`Unsupported JPEG encoder: ${jpegEncoder}`);
+  }
+  const pages = await preparePages(inspection, jpegEncoder, options.cjpegliPath);
   const destination = resolve(outputPath);
   await mkdir(dirname(destination), { recursive: true });
   await createComicKpf(destination, pages, {
@@ -152,9 +159,12 @@ async function inspectCbz(inputPath: string, options: CbzOptions): Promise<Inspe
   };
 }
 
-async function preparePages(inspection: Inspection, useMozjpeg: boolean): Promise<KpfPage[]> {
+async function preparePages(
+  inspection: Inspection,
+  jpegEncoder: PageJpegEncoder,
+  cjpegliPath?: string,
+): Promise<KpfPage[]> {
   const pages: KpfPage[] = [];
-  const jpegOptions = useMozjpeg ? MOZJPEG_OPTIONS : FAST_JPEG_OPTIONS;
   for (const [sourceIndex, source] of inspection.plan.sourcePages.entries()) {
     const entry = inspection.imageEntries[sourceIndex];
     if (!entry) throw new Error(`Missing source image ${source.sourceName}`);
@@ -163,8 +173,11 @@ async function preparePages(inspection: Inspection, useMozjpeg: boolean): Promis
     if (!source.doublePage) {
       const bounds = containBounds(source.width, source.height);
       pages.push({
-        data: await pipeline.resize(bounds.width, bounds.height, { fit: "fill" })
-          .jpeg(jpegOptions).toBuffer(),
+        data: await encodePage(
+          pipeline.resize(bounds.width, bounds.height, { fit: "fill" }),
+          jpegEncoder,
+          cjpegliPath,
+        ),
         width: bounds.width,
         height: bounds.height,
         sourceName: source.sourceName,
@@ -187,10 +200,13 @@ async function preparePages(inspection: Inspection, useMozjpeg: boolean): Promis
     for (const half of halves) {
       const bounds = containBounds(half.width, source.height);
       pages.push({
-        data: await pipeline.clone()
-          .extract({ left: half.left, top: 0, width: half.width, height: source.height })
-          .resize(bounds.width, bounds.height, { fit: "fill" })
-          .jpeg(jpegOptions).toBuffer(),
+        data: await encodePage(
+          pipeline.clone()
+            .extract({ left: half.left, top: 0, width: half.width, height: source.height })
+            .resize(bounds.width, bounds.height, { fit: "fill" }),
+          jpegEncoder,
+          cjpegliPath,
+        ),
         width: bounds.width,
         height: bounds.height,
         sourceName: `${source.sourceName}#${half.side}`,
@@ -199,6 +215,19 @@ async function preparePages(inspection: Inspection, useMozjpeg: boolean): Promis
     }
   }
   return pages;
+}
+
+async function encodePage(
+  pipeline: ReturnType<typeof sharp>,
+  jpegEncoder: PageJpegEncoder,
+  cjpegliPath?: string,
+): Promise<Buffer> {
+  if (jpegEncoder === "mozjpeg") return pipeline.jpeg(MOZJPEG_OPTIONS).toBuffer();
+  if (jpegEncoder === "legacy") return pipeline.jpeg(FAST_JPEG_OPTIONS).toBuffer();
+
+  const { data, info } = await pipeline.removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  if (info.channels !== 3) throw new Error(`JPEGli requires RGB input; Sharp produced ${info.channels} channels`);
+  return encodeJpegli(data, info.width, info.height, cjpegliPath ?? process.env.CJPEGLI_PATH ?? "cjpegli");
 }
 
 function containBounds(sourceWidth: number, sourceHeight: number): Bounds {

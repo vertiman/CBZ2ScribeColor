@@ -70,11 +70,23 @@ describe("CBZ to KPF preparation", () => {
     const output = join(directory, "Fast.kpf");
     await createCbz(input, undefined, [[1000, 1500]]);
 
-    await createKpfFromCbz(input, output, { mozjpeg: false });
+    await createKpfFromCbz(input, output, { jpegEncoder: "legacy" });
 
     const page = await sharp(new AdmZip(output).getEntry("book_1.jpg")?.getData()).metadata();
     expect(page.isProgressive).toBe(false);
     expect(page.chromaSubsampling).toBe("4:4:4");
+  });
+
+  it("reports a missing JPEGli executable", async () => {
+    const directory = await temporaryDirectory();
+    const input = join(directory, "Jpegli.cbz");
+    const output = join(directory, "Jpegli.kpf");
+    await createCbz(input, undefined, [[100, 150]]);
+
+    await expect(createKpfFromCbz(input, output, {
+      jpegEncoder: "jpegli",
+      cjpegliPath: join(directory, "missing-cjpegli"),
+    })).rejects.toThrow("Could not start cjpegli");
   });
 });
 

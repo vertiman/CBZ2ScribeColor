@@ -16,7 +16,7 @@ For each CBZ, the tool:
 3. Detects double-page artwork using its width-to-height ratio.
 4. Splits each detected spread into its original left and right halves and places them in one native facing-page KFX section.
 5. Resizes artwork without changing its aspect ratio, up to 1986×2648 pixels per physical page.
-6. Encodes artwork as progressive 4:4:4 JPEGs using tuned MozJPEG compression by default.
+6. Encodes artwork as 4:4:4 JPEGs using MozJPEG by default, with JPEGli and the former fast encoder available as alternatives.
 7. Uses the artwork dimensions as the KFX logical page dimensions. This prevents Kindle's four Virtual Panels from magnifying black aspect-ratio margins.
 8. Adds a black fixed-layout page background, comic flags, horizontal Virtual Panels, reading direction, cover, and native spread metadata.
 9. Builds a Kindle Publishing Format (`.kpf`) package in Node.js.
@@ -33,6 +33,8 @@ The original CBZ is never modified.
 - [Kindle Previewer 3](https://kdp.amazon.com/en_US/help/topic/G202131170), used by KFX Output's conversion pipeline.
 
 Windows is the primary tested platform. The tool also checks the standard macOS Calibre location and can use `calibre-debug` from `PATH` on other systems. A working KFX Output/Kindle Previewer setup is still required.
+
+[Google JPEGli](https://github.com/google/jpegli)'s `cjpegli` executable is an optional requirement only when using `--jpeg-encoder jpegli`. Build JPEGli according to its project instructions, then put `cjpegli` on `PATH`, set `CJPEGLI_PATH`, or pass its location with `--cjpegli`. JPEGli is not bundled with this npm package.
 
 ### Installing KFX Output
 
@@ -70,7 +72,7 @@ npx cbz2scribecolor "D:\Comics\Issue 001.cbz"
 ```
 
 > [!NOTE]
-> `npx` supplies only the CBZ2ScribeColor Node.js command. You still need Node.js 22.5 or newer, Calibre, the KFX Output plugin installed in Calibre, and Kindle Previewer 3. Ensure `calibre-debug` is discoverable in a standard Calibre installation or on `PATH`; otherwise pass `--calibre-debug <path>` or set `CALIBRE_DEBUG_PATH`.
+> `npx` supplies only the CBZ2ScribeColor Node.js command. You still need Node.js 22.5 or newer, Calibre, the KFX Output plugin installed in Calibre, and Kindle Previewer 3. Ensure `calibre-debug` is discoverable in a standard Calibre installation or on `PATH`; otherwise pass `--calibre-debug <path>` or set `CALIBRE_DEBUG_PATH`. Selecting JPEGli also requires a separate `cjpegli` installation; `npx` does not provide it.
 
 Pass CLI options after the input path in the same way as a global installation:
 
@@ -144,11 +146,19 @@ Force right-to-left manga reading and retain the generated KPF for inspection:
 cbz2scribe manga.cbz --direction rtl --keep-kpf
 ```
 
+Use JPEGli for a middle ground between compression and speed:
+
+```bash
+cbz2scribe manga.cbz --jpeg-encoder jpegli --cjpegli "C:\Tools\jpegli\cjpegli.exe"
+```
+
 Use the former, faster JPEG encoder when conversion speed matters more than output size:
 
 ```bash
-cbz2scribe manga.cbz --no-mozjpeg
+cbz2scribe manga.cbz --jpeg-encoder legacy
 ```
+
+`--no-mozjpeg` remains a shortcut for `--jpeg-encoder legacy`.
 
 ## Command-line options
 
@@ -164,7 +174,9 @@ cbz2scribe manga.cbz --no-mozjpeg
 | `--calibre-debug <path>` | Auto-detected | Full path to Calibre's `calibre-debug` executable. |
 | `-j, --jobs <count>` | `12` | Maximum number of CBZ files prepared concurrently. Each completed KPF is then compiled through KFX Output. |
 | `--keep-kpf` | Off | Keep the intermediate Kindle Publishing Format package after successful KFX compilation. Failed conversions retain their KPF for diagnosis. |
-| `--no-mozjpeg` | MozJPEG on | Use the former quality-90, 4:4:4 JPEG encoder. It is much faster but produces larger page images. |
+| `--jpeg-encoder <mozjpeg\|jpegli\|legacy>` | `mozjpeg` | Select tuned MozJPEG, external Google JPEGli, or the former fast JPEG encoder. |
+| `--cjpegli <path>` | Auto-detected | Full path to `cjpegli`. Used only with `--jpeg-encoder jpegli`; otherwise checks `CJPEGLI_PATH` and then `PATH`. |
+| `--no-mozjpeg` | Off | Shortcut for `--jpeg-encoder legacy`. Cannot be combined with `--jpeg-encoder`. |
 | `-h, --help` | — | Show CLI help. |
 
 Existing destination KFX files with the same name are replaced. When processing multiple files, successful conversions are retained even if another input fails; the command exits non-zero and reports every failed filename at the end.
@@ -203,16 +215,17 @@ KFX image resources contain only the resized artwork bounds. Letterboxing is pro
 
 ## JPEG compression
 
-Page artwork is encoded by default with Sharp's built-in MozJPEG mode using progressive scans and 4:4:4 chroma sampling. The quality and quantization-table settings were calibrated against the previous quality-90 JPEG encoder, rather than assuming that equal numeric quality values produce equal fidelity with different quantization tables. No additional MozJPEG executable or package is required.
+Page artwork is encoded by default with Sharp's built-in MozJPEG mode using progressive scans and 4:4:4 chroma sampling. JPEGli uses distance 0.8, progressive level 2, and 4:4:4 chroma. Both profiles were calibrated against the previous quality-90 JPEG encoder rather than assuming that numeric quality settings are comparable across encoders. MozJPEG needs no additional executable; JPEGli invokes a separately installed `cjpegli` process and streams each resized page through it without temporary files.
 
-An encoder-only benchmark on this project's primary Windows test PC used three full comics: 82 source images producing 87 physical pages, including five split spreads. Every candidate encoded the same resized, uncompressed pixels.
+An encoder-only benchmark on this project's primary Windows test PC used `cjpegli` 0.11.2 and three full comics: 82 source images producing 87 physical pages, including five split spreads. Every candidate encoded the same resized, uncompressed pixels. JPEGli's timing includes process startup and streaming for every page.
 
 | Encoder | Page data | JPEG encode time | PSNR | Mean global SSIM |
 | --- | ---: | ---: | ---: | ---: |
 | Previous quality-90, 4:4:4 JPEG | 123.28 MiB | 3.5 s | 40.12 dB | 0.99958 |
 | Tuned MozJPEG, 4:4:4 | 98.57 MiB | 54.5 s | 40.91 dB | 0.99966 |
+| JPEGli distance 0.8, 4:4:4 | 110.80 MiB | 10.0 s | 40.24 dB | 0.99974 |
 
-In this sample, MozJPEG made the image payload **20.0% smaller** while slightly improving both measured fidelity scores. JPEG encoding itself was **15.6 times slower**. Total conversion is not expected to be 15.6 times slower because CBZ reading, image decoding and resizing, KPF assembly, KFX compilation, and metadata writing are unchanged. Savings in a finished KPF or KFX can also vary with the artwork and non-image container overhead. Pass `--no-mozjpeg` to restore the benchmark's previous encoder when speed is more important than the size saving.
+In this sample, MozJPEG made the image payload **20.0% smaller** and took **15.6 times** as long to encode. JPEGli made it **10.1% smaller** and took **2.86 times** as long as legacy; it was **5.47 times faster than MozJPEG**. All three calibrated profiles met or exceeded the legacy fidelity scores in this sample. Total conversion slowdowns will be lower because CBZ reading, image decoding and resizing, KPF assembly, KFX compilation, and metadata writing are unchanged. Finished KPF/KFX savings vary with artwork and non-image container overhead.
 
 ## Reading direction
 

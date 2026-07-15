@@ -36,6 +36,10 @@ describe("CBZ to KPF preparation", () => {
     expect([single.width, single.height]).toEqual([1986, 1986]);
     expect([firstHalf.width, firstHalf.height]).toEqual([1765, 2648]);
     expect([secondHalf.width, secondHalf.height]).toEqual([1765, 2648]);
+    expect([single.isProgressive, firstHalf.isProgressive, secondHalf.isProgressive])
+      .toEqual([true, true, true]);
+    expect([single.chromaSubsampling, firstHalf.chromaSubsampling, secondHalf.chromaSubsampling])
+      .toEqual(["4:4:4", "4:4:4", "4:4:4"]);
     const kcb = JSON.parse(kpf.readAsText("book.kcb")) as { book_state: { book_reading_option: number; book_virtual_panelmovement: number } };
     expect(kcb.book_state.book_reading_option).toBe(2);
     expect(kcb.book_state.book_virtual_panelmovement).toBe(1);
@@ -58,6 +62,31 @@ describe("CBZ to KPF preparation", () => {
     expect(plan.title).toBe("010 - No Metadata");
     expect(plan.direction).toBe("rtl");
     expect(plan.comicInfoFound).toBe(false);
+  });
+
+  it("can use the faster legacy JPEG encoder", async () => {
+    const directory = await temporaryDirectory();
+    const input = join(directory, "Fast.cbz");
+    const output = join(directory, "Fast.kpf");
+    await createCbz(input, undefined, [[1000, 1500]]);
+
+    await createKpfFromCbz(input, output, { jpegEncoder: "legacy" });
+
+    const page = await sharp(new AdmZip(output).getEntry("book_1.jpg")?.getData()).metadata();
+    expect(page.isProgressive).toBe(false);
+    expect(page.chromaSubsampling).toBe("4:4:4");
+  });
+
+  it("reports a missing JPEGli executable", async () => {
+    const directory = await temporaryDirectory();
+    const input = join(directory, "Jpegli.cbz");
+    const output = join(directory, "Jpegli.kpf");
+    await createCbz(input, undefined, [[100, 150]]);
+
+    await expect(createKpfFromCbz(input, output, {
+      jpegEncoder: "jpegli",
+      cjpegliPath: join(directory, "missing-cjpegli"),
+    })).rejects.toThrow("Could not start cjpegli");
   });
 });
 

@@ -2,8 +2,9 @@
 import { readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { Command, Option } from "commander";
-import { createKpfFromCbz, planCbz, type ConversionPlan, type ReadingDirection } from "./cbz.js";
+import { createKpfFromCbz, planCbz, type ConversionPlan, type PageJpegEncoder, type ReadingDirection } from "./cbz.js";
 import { runWithConcurrency } from "./concurrency.js";
+import { findCjpegli } from "./jpegli.js";
 import { compileKfx, findKfxOutput } from "./kfx-output.js";
 
 interface CliOptions {
@@ -16,6 +17,9 @@ interface CliOptions {
   calibreDebug?: string;
   jobs: string;
   keepKpf: boolean;
+  jpegEncoder: PageJpegEncoder;
+  cjpegli?: string;
+  mozjpeg: boolean;
 }
 
 const program = new Command()
@@ -31,6 +35,9 @@ const program = new Command()
   .option("--calibre-debug <path>", "explicit path to calibre-debug with the KFX Output plugin")
   .option("-j, --jobs <count>", "maximum files processed concurrently", "12")
   .option("--keep-kpf", "retain the generated KPF source package", false)
+  .addOption(new Option("--jpeg-encoder <encoder>", "page JPEG encoder").choices(["mozjpeg", "jpegli", "legacy"]).default("mozjpeg"))
+  .option("--cjpegli <path>", "explicit path to cjpegli for --jpeg-encoder jpegli")
+  .option("--no-mozjpeg", "shortcut for --jpeg-encoder legacy")
   .showHelpAfterError()
   .parse();
 
@@ -48,6 +55,10 @@ try {
 async function run(inputPath: string, options: CliOptions): Promise<void> {
   const wideRatio = positiveNumber(options.wideRatio, "wide-ratio");
   const jobs = positiveInteger(options.jobs, "jobs");
+  const jpegEncoder = options.mozjpeg ? options.jpegEncoder : "legacy";
+  if (!options.mozjpeg && program.getOptionValueSource("jpegEncoder") === "cli") {
+    throw new Error("--no-mozjpeg cannot be combined with --jpeg-encoder");
+  }
   const inputInfo = await stat(inputPath);
   const sources = await findCbzFiles(inputPath, inputInfo.isDirectory(), options.recursive);
   if (sources.length === 0) throw new Error("No CBZ files found");
@@ -57,6 +68,13 @@ async function run(inputPath: string, options: CliOptions): Promise<void> {
     throw new Error("Calibre's KFX Output plugin was not found. Install Calibre, Kindle Previewer 3, and KFX Output, or pass --calibre-debug <path>.");
   }
   if (calibreDebug) console.log(`Using KFX Output through: ${calibreDebug}`);
+
+  const cjpegli = !options.dryRun && jpegEncoder === "jpegli" ? await findCjpegli(options.cjpegli) : undefined;
+  if (!options.dryRun && jpegEncoder === "jpegli" && !cjpegli) {
+    throw new Error("cjpegli was not found. Install Google JPEGli and put cjpegli on PATH, set CJPEGLI_PATH, or pass --cjpegli <path>.");
+  }
+  if (cjpegli) console.log(`Using JPEGli through: ${cjpegli}`);
+  if (!options.dryRun) console.log(`JPEG encoder: ${jpegEncoder}`);
 
   const outputRoot = resolve(options.output);
   const failures: string[] = [];
@@ -68,7 +86,12 @@ async function run(inputPath: string, options: CliOptions): Promise<void> {
     const kfxPath = outputPathFor(source, inputPath, inputInfo.isDirectory(), outputRoot, options.inPlace, ".kfx");
     const kpfPath = outputPathFor(source, inputPath, inputInfo.isDirectory(), outputRoot, options.inPlace, ".kpf");
     try {
-      const conversionOptions = { direction: options.direction, wideRatio };
+      const conversionOptions = {
+        direction: options.direction,
+        wideRatio,
+        jpegEncoder,
+        ...(cjpegli ? { cjpegliPath: cjpegli } : {}),
+      };
       const plan = options.dryRun ? await planCbz(source, conversionOptions) : await createKpfFromCbz(source, kpfPath, conversionOptions);
       printPlan(label, plan, options.dryRun);
       if (!options.dryRun) {

@@ -23,7 +23,8 @@
     "cbz2scribecolor": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "prepack": "npm run build",
     "start": "node dist/cli.js",
     "test": "vitest run",
@@ -40,6 +41,7 @@
     "kindle",
     "kfx",
     "comic",
+    "jpegli",
     "kindle-scribe",
     "colorsoft"
   ],

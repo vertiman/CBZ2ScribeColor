@@ -12,6 +12,7 @@ export type ReadingDirection = "ltr" | "rtl";
 export interface CbzOptions {
   direction?: ReadingDirection | "auto";
   wideRatio?: number;
+  mozjpeg?: boolean;
 }
 
 export interface BookMetadata {
@@ -64,6 +65,17 @@ const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".av
 const natural = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 const DEFAULT_WIDE_RATIO = 1.125;
 const PAGE_BACKGROUND = "#000000";
+// Table 1 at quality 76 matched or exceeded the former quality-90 encoder in the project benchmark.
+const MOZJPEG_OPTIONS = {
+  quality: 76,
+  chromaSubsampling: "4:4:4",
+  mozjpeg: true,
+  quantisationTable: 1,
+} as const;
+const FAST_JPEG_OPTIONS = {
+  quality: 90,
+  chromaSubsampling: "4:4:4",
+} as const;
 
 export async function planCbz(inputPath: string, options: CbzOptions = {}): Promise<ConversionPlan> {
   return (await inspectCbz(resolve(inputPath), options)).plan;
@@ -75,7 +87,7 @@ export async function createKpfFromCbz(
   options: CbzOptions = {},
 ): Promise<ConversionPlan> {
   const inspection = await inspectCbz(resolve(inputPath), options);
-  const pages = await preparePages(inspection);
+  const pages = await preparePages(inspection, options.mozjpeg ?? true);
   const destination = resolve(outputPath);
   await mkdir(dirname(destination), { recursive: true });
   await createComicKpf(destination, pages, {
@@ -140,8 +152,9 @@ async function inspectCbz(inputPath: string, options: CbzOptions): Promise<Inspe
   };
 }
 
-async function preparePages(inspection: Inspection): Promise<KpfPage[]> {
+async function preparePages(inspection: Inspection, useMozjpeg: boolean): Promise<KpfPage[]> {
   const pages: KpfPage[] = [];
+  const jpegOptions = useMozjpeg ? MOZJPEG_OPTIONS : FAST_JPEG_OPTIONS;
   for (const [sourceIndex, source] of inspection.plan.sourcePages.entries()) {
     const entry = inspection.imageEntries[sourceIndex];
     if (!entry) throw new Error(`Missing source image ${source.sourceName}`);
@@ -151,7 +164,7 @@ async function preparePages(inspection: Inspection): Promise<KpfPage[]> {
       const bounds = containBounds(source.width, source.height);
       pages.push({
         data: await pipeline.resize(bounds.width, bounds.height, { fit: "fill" })
-          .jpeg({ quality: 90, chromaSubsampling: "4:4:4" }).toBuffer(),
+          .jpeg(jpegOptions).toBuffer(),
         width: bounds.width,
         height: bounds.height,
         sourceName: source.sourceName,
@@ -177,7 +190,7 @@ async function preparePages(inspection: Inspection): Promise<KpfPage[]> {
         data: await pipeline.clone()
           .extract({ left: half.left, top: 0, width: half.width, height: source.height })
           .resize(bounds.width, bounds.height, { fit: "fill" })
-          .jpeg({ quality: 90, chromaSubsampling: "4:4:4" }).toBuffer(),
+          .jpeg(jpegOptions).toBuffer(),
         width: bounds.width,
         height: bounds.height,
         sourceName: `${source.sourceName}#${half.side}`,

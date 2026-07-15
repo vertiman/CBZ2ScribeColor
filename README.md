@@ -16,11 +16,12 @@ For each CBZ, the tool:
 3. Detects double-page artwork using its width-to-height ratio.
 4. Splits each detected spread into its original left and right halves and places them in one native facing-page KFX section.
 5. Resizes artwork without changing its aspect ratio, up to 1986×2648 pixels per physical page.
-6. Uses the artwork dimensions as the KFX logical page dimensions. This prevents Kindle's four Virtual Panels from magnifying black aspect-ratio margins.
-7. Adds a black fixed-layout page background, comic flags, horizontal Virtual Panels, reading direction, cover, and native spread metadata.
-8. Builds a Kindle Publishing Format (`.kpf`) package in Node.js.
-9. Uses Calibre's KFX Output plugin to compile the KPF into a sideloadable `.kfx` file.
-10. Writes supported ComicInfo fields into the final KFX metadata with Calibre's `ebook-meta`.
+6. Encodes artwork as progressive 4:4:4 JPEGs using tuned MozJPEG compression by default.
+7. Uses the artwork dimensions as the KFX logical page dimensions. This prevents Kindle's four Virtual Panels from magnifying black aspect-ratio margins.
+8. Adds a black fixed-layout page background, comic flags, horizontal Virtual Panels, reading direction, cover, and native spread metadata.
+9. Builds a Kindle Publishing Format (`.kpf`) package in Node.js.
+10. Uses Calibre's KFX Output plugin to compile the KPF into a sideloadable `.kfx` file.
+11. Writes supported ComicInfo fields into the final KFX metadata with Calibre's `ebook-meta`.
 
 The original CBZ is never modified.
 
@@ -143,6 +144,12 @@ Force right-to-left manga reading and retain the generated KPF for inspection:
 cbz2scribe manga.cbz --direction rtl --keep-kpf
 ```
 
+Use the former, faster JPEG encoder when conversion speed matters more than output size:
+
+```bash
+cbz2scribe manga.cbz --no-mozjpeg
+```
+
 ## Command-line options
 
 | Option | Default | Description |
@@ -157,6 +164,7 @@ cbz2scribe manga.cbz --direction rtl --keep-kpf
 | `--calibre-debug <path>` | Auto-detected | Full path to Calibre's `calibre-debug` executable. |
 | `-j, --jobs <count>` | `12` | Maximum number of CBZ files prepared concurrently. Each completed KPF is then compiled through KFX Output. |
 | `--keep-kpf` | Off | Keep the intermediate Kindle Publishing Format package after successful KFX compilation. Failed conversions retain their KPF for diagnosis. |
+| `--no-mozjpeg` | MozJPEG on | Use the former quality-90, 4:4:4 JPEG encoder. It is much faster but produces larger page images. |
 | `-h, --help` | — | Show CLI help. |
 
 Existing destination KFX files with the same name are replaced. When processing multiple files, successful conversions are retained even if another input fails; the command exits non-zero and reports every failed filename at the end.
@@ -192,6 +200,19 @@ A source image whose width-to-height ratio meets `--wide-ratio` is treated as a 
 - The original center gutter remains continuous because no padding is inserted between the halves.
 
 KFX image resources contain only the resized artwork bounds. Letterboxing is provided by the black logical page background rather than being baked into those resources. Kindle's synthetic four-corner Virtual Panels therefore divide and magnify the artwork rather than including top, bottom, or outside-edge bars.
+
+## JPEG compression
+
+Page artwork is encoded by default with Sharp's built-in MozJPEG mode using progressive scans and 4:4:4 chroma sampling. The quality and quantization-table settings were calibrated against the previous quality-90 JPEG encoder, rather than assuming that equal numeric quality values produce equal fidelity with different quantization tables. No additional MozJPEG executable or package is required.
+
+An encoder-only benchmark on this project's primary Windows test PC used three full comics: 82 source images producing 87 physical pages, including five split spreads. Every candidate encoded the same resized, uncompressed pixels.
+
+| Encoder | Page data | JPEG encode time | PSNR | Mean global SSIM |
+| --- | ---: | ---: | ---: | ---: |
+| Previous quality-90, 4:4:4 JPEG | 123.28 MiB | 3.5 s | 40.12 dB | 0.99958 |
+| Tuned MozJPEG, 4:4:4 | 98.57 MiB | 54.5 s | 40.91 dB | 0.99966 |
+
+In this sample, MozJPEG made the image payload **20.0% smaller** while slightly improving both measured fidelity scores. JPEG encoding itself was **15.6 times slower**. Total conversion is not expected to be 15.6 times slower because CBZ reading, image decoding and resizing, KPF assembly, KFX compilation, and metadata writing are unchanged. Savings in a finished KPF or KFX can also vary with the artwork and non-image container overhead. Pass `--no-mozjpeg` to restore the benchmark's previous encoder when speed is more important than the size saving.
 
 ## Reading direction
 

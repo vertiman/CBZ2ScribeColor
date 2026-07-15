@@ -16,6 +16,7 @@ interface CliOptions {
   calibreDebug?: string;
   jobs: string;
   keepKpf: boolean;
+  mozjpeg: boolean;
 }
 
 const program = new Command()
@@ -31,6 +32,7 @@ const program = new Command()
   .option("--calibre-debug <path>", "explicit path to calibre-debug with the KFX Output plugin")
   .option("-j, --jobs <count>", "maximum files processed concurrently", "12")
   .option("--keep-kpf", "retain the generated KPF source package", false)
+  .option("--no-mozjpeg", "use the faster legacy JPEG encoder with larger output")
   .showHelpAfterError()
   .parse();
 
@@ -68,7 +70,7 @@ async function run(inputPath: string, options: CliOptions): Promise<void> {
     const kfxPath = outputPathFor(source, inputPath, inputInfo.isDirectory(), outputRoot, options.inPlace, ".kfx");
     const kpfPath = outputPathFor(source, inputPath, inputInfo.isDirectory(), outputRoot, options.inPlace, ".kpf");
     try {
-      const conversionOptions = { direction: options.direction, wideRatio };
+      const conversionOptions = { direction: options.direction, wideRatio, mozjpeg: options.mozjpeg };
       const plan = options.dryRun ? await planCbz(source, conversionOptions) : await createKpfFromCbz(source, kpfPath, conversionOptions);
       printPlan(label, plan, options.dryRun);
       if (!options.dryRun) {

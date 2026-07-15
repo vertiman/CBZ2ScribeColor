@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+kfx-output/
+*.cbz
+*.kpf
+*.kfx
+.DS_Store
+._*

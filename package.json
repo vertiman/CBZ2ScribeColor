@@ -1,0 +1,47 @@
+{
+  "name": "cbz2scribecolor",
+  "version": "1.0.0",
+  "description": "Convert CBZ comics to sideloadable KFX for Kindle Scribe Colorsoft.",
+  "author": "vertiman",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vertiman/CBZ2ScribeColor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vertiman/CBZ2ScribeColor/issues"
+  },
+  "homepage": "https://github.com/vertiman/CBZ2ScribeColor#readme",
+  "type": "module",
+  "bin": {
+    "cbz2scribe": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/cli.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "keywords": [
+    "cbz",
+    "kindle",
+    "kfx",
+    "comic",
+    "kindle-scribe",
+    "colorsoft"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "adm-zip": "^0.6.0",
+    "commander": "^14.0.0",
+    "sharp": "^0.35.3"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/node": "^24.0.13",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

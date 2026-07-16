@@ -2,8 +2,9 @@ import { mkdir } from "node:fs/promises";
 import { basename, dirname, extname, resolve } from "node:path";
 import AdmZip from "adm-zip";
 import sharp from "sharp";
+import type { TaskRunner } from "./concurrency.js";
 import { encodeJpegli } from "./jpegli.js";
-import { createComicKpf, type KpfPage } from "./kindle-kpf.js";
+import { createComicKpf, type KpfPage, type KpfTocEntry } from "./kindle-kpf.js";
 
 export const SCRIBE_COLORSOFT_WIDTH = 1986;
 export const SCRIBE_COLORSOFT_HEIGHT = 2648;
@@ -16,6 +17,7 @@ export interface CbzOptions {
   wideRatio?: number;
   jpegEncoder?: PageJpegEncoder;
   cjpegliPath?: string;
+  pageTaskRunner?: TaskRunner;
 }
 
 export interface BookMetadata {
@@ -50,6 +52,15 @@ export interface ConversionPlan {
   sourcePages: SourcePage[];
   outputPageCount: number;
   comicInfoFound: boolean;
+  metadata: BookMetadata;
+}
+
+export interface BundleConversionPlan {
+  inputPaths: string[];
+  title: string;
+  direction: ReadingDirection;
+  books: ConversionPlan[];
+  outputPageCount: number;
   metadata: BookMetadata;
 }
 
@@ -94,7 +105,7 @@ export async function createKpfFromCbz(
   if (!["mozjpeg", "jpegli", "legacy"].includes(jpegEncoder)) {
     throw new Error(`Unsupported JPEG encoder: ${jpegEncoder}`);
   }
-  const pages = await preparePages(inspection, jpegEncoder, options.cjpegliPath);
+  const pages = await preparePages(inspection, jpegEncoder, options.cjpegliPath, options.pageTaskRunner);
   const destination = resolve(outputPath);
   await mkdir(dirname(destination), { recursive: true });
   await createComicKpf(destination, pages, {
@@ -104,6 +115,80 @@ export async function createKpfFromCbz(
     direction: inspection.metadata.direction,
   });
   return inspection.plan;
+}
+
+export async function planCbzBundle(
+  inputPaths: string[],
+  title: string,
+  options: CbzOptions = {},
+): Promise<BundleConversionPlan> {
+  return (await inspectCbzBundle(inputPaths, title, options)).plan;
+}
+
+export async function createKpfFromCbzBundle(
+  inputPaths: string[],
+  outputPath: string,
+  title: string,
+  options: CbzOptions = {},
+): Promise<BundleConversionPlan> {
+  const bundle = await inspectCbzBundle(inputPaths, title, options);
+  const jpegEncoder = options.jpegEncoder ?? "mozjpeg";
+  if (!["mozjpeg", "jpegli", "legacy"].includes(jpegEncoder)) {
+    throw new Error(`Unsupported JPEG encoder: ${jpegEncoder}`);
+  }
+  const pages: KpfPage[] = [];
+  const toc: KpfTocEntry[] = [];
+  for (const [bookIndex, inspection] of bundle.inspections.entries()) {
+    toc.push({ label: inspection.plan.title, pageIndex: pages.length });
+    const bookPages = await preparePages(inspection, jpegEncoder, options.cjpegliPath, options.pageTaskRunner);
+    for (const page of bookPages) {
+      pages.push({
+        ...page,
+        sourceName: `${basename(inspection.plan.inputPath)}/${page.sourceName}`,
+        ...(page.spreadPair ? { spreadPair: `book-${bookIndex + 1}-${page.spreadPair}` } : {}),
+      });
+    }
+  }
+  const destination = resolve(outputPath);
+  await mkdir(dirname(destination), { recursive: true });
+  await createComicKpf(destination, pages, {
+    title: bundle.plan.title,
+    creators: bundle.plan.metadata.creators,
+    language: bundle.plan.metadata.language,
+    direction: bundle.plan.direction,
+    toc,
+  });
+  return bundle.plan;
+}
+
+async function inspectCbzBundle(
+  inputPaths: string[],
+  title: string,
+  options: CbzOptions,
+): Promise<{ plan: BundleConversionPlan; inspections: Inspection[] }> {
+  if (inputPaths.length === 0) throw new Error("Cannot create a bundle without CBZ files");
+  const bundleTitle = title.trim();
+  if (!bundleTitle) throw new Error("Bundle title must not be empty");
+  const inspections: Inspection[] = [];
+  for (const inputPath of inputPaths) inspections.push(await inspectCbz(resolve(inputPath), options));
+  const direction = inspections[0]!.plan.direction;
+  const mismatched = inspections.find((inspection) => inspection.plan.direction !== direction);
+  if (mismatched) {
+    throw new Error(`Bundle contains mixed reading directions; ${basename(mismatched.plan.inputPath)} is ${mismatched.plan.direction} while the first book is ${direction}. Pass --direction ltr or --direction rtl to override.`);
+  }
+  const firstMetadata = inspections[0]!.metadata;
+  const metadata: BookMetadata = { ...firstMetadata, title: bundleTitle, direction };
+  return {
+    plan: {
+      inputPaths: inspections.map((inspection) => inspection.plan.inputPath),
+      title: bundleTitle,
+      direction,
+      books: inspections.map((inspection) => inspection.plan),
+      outputPageCount: inspections.reduce((total, inspection) => total + inspection.plan.outputPageCount, 0),
+      metadata,
+    },
+    inspections,
+  };
 }
 
 async function inspectCbz(inputPath: string, options: CbzOptions): Promise<Inspection> {
@@ -163,56 +248,76 @@ async function preparePages(
   inspection: Inspection,
   jpegEncoder: PageJpegEncoder,
   cjpegliPath?: string,
+  pageTaskRunner?: TaskRunner,
 ): Promise<KpfPage[]> {
+  if (pageTaskRunner) {
+    const batches = await Promise.all(inspection.plan.sourcePages.map((_, sourceIndex) => pageTaskRunner(
+      () => prepareSourcePage(inspection, sourceIndex, jpegEncoder, cjpegliPath),
+    )));
+    return batches.flat();
+  }
+
+  const batches: KpfPage[][] = [];
+  for (const sourceIndex of inspection.plan.sourcePages.keys()) {
+    batches.push(await prepareSourcePage(inspection, sourceIndex, jpegEncoder, cjpegliPath));
+  }
+  return batches.flat();
+}
+
+async function prepareSourcePage(
+  inspection: Inspection,
+  sourceIndex: number,
+  jpegEncoder: PageJpegEncoder,
+  cjpegliPath?: string,
+): Promise<KpfPage[]> {
+  const source = inspection.plan.sourcePages[sourceIndex];
+  if (!source) throw new Error(`Missing source page at index ${sourceIndex}`);
+  const entry = inspection.imageEntries[sourceIndex];
+  if (!entry) throw new Error(`Missing source image ${source.sourceName}`);
+  const pipeline = sharp(entry.getData(), { animated: false }).rotate().flatten({ background: PAGE_BACKGROUND });
+
+  if (!source.doublePage) {
+    const bounds = containBounds(source.width, source.height);
+    return [{
+      data: await encodePage(
+        pipeline.resize(bounds.width, bounds.height, { fit: "fill" }),
+        jpegEncoder,
+        cjpegliPath,
+      ),
+      width: bounds.width,
+      height: bounds.height,
+      sourceName: source.sourceName,
+    }];
+  }
+
   const pages: KpfPage[] = [];
-  for (const [sourceIndex, source] of inspection.plan.sourcePages.entries()) {
-    const entry = inspection.imageEntries[sourceIndex];
-    if (!entry) throw new Error(`Missing source image ${source.sourceName}`);
-    const pipeline = sharp(entry.getData(), { animated: false }).rotate().flatten({ background: PAGE_BACKGROUND });
-
-    if (!source.doublePage) {
-      const bounds = containBounds(source.width, source.height);
-      pages.push({
-        data: await encodePage(
-          pipeline.resize(bounds.width, bounds.height, { fit: "fill" }),
-          jpegEncoder,
-          cjpegliPath,
-        ),
-        width: bounds.width,
-        height: bounds.height,
-        sourceName: source.sourceName,
-      });
-      continue;
-    }
-
-    const leftWidth = Math.floor(source.width / 2);
-    const rightWidth = source.width - leftWidth;
-    const halves = inspection.plan.direction === "rtl"
-      ? [
-          { side: "right", left: leftWidth, width: rightWidth },
-          { side: "left", left: 0, width: leftWidth },
-        ]
-      : [
-          { side: "left", left: 0, width: leftWidth },
-          { side: "right", left: leftWidth, width: rightWidth },
-        ];
-    const spreadPair = `source-${source.index}`;
-    for (const half of halves) {
-      const bounds = containBounds(half.width, source.height);
-      pages.push({
-        data: await encodePage(
-          pipeline.clone()
-            .extract({ left: half.left, top: 0, width: half.width, height: source.height })
-            .resize(bounds.width, bounds.height, { fit: "fill" }),
-          jpegEncoder,
-          cjpegliPath,
-        ),
-        width: bounds.width,
-        height: bounds.height,
-        sourceName: `${source.sourceName}#${half.side}`,
-        spreadPair,
-      });
-    }
+  const leftWidth = Math.floor(source.width / 2);
+  const rightWidth = source.width - leftWidth;
+  const halves = inspection.plan.direction === "rtl"
+    ? [
+        { side: "right", left: leftWidth, width: rightWidth },
+        { side: "left", left: 0, width: leftWidth },
+      ]
+    : [
+        { side: "left", left: 0, width: leftWidth },
+        { side: "right", left: leftWidth, width: rightWidth },
+      ];
+  const spreadPair = `source-${source.index}`;
+  for (const half of halves) {
+    const bounds = containBounds(half.width, source.height);
+    pages.push({
+      data: await encodePage(
+        pipeline.clone()
+          .extract({ left: half.left, top: 0, width: half.width, height: source.height })
+          .resize(bounds.width, bounds.height, { fit: "fill" }),
+        jpegEncoder,
+        cjpegliPath,
+      ),
+      width: bounds.width,
+      height: bounds.height,
+      sourceName: `${source.sourceName}#${half.side}`,
+      spreadPair,
+    });
   }
   return pages;
 }

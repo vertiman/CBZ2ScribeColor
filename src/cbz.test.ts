@@ -5,7 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 import AdmZip from "adm-zip";
 import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
-import { createKpfFromCbz, planCbz } from "./cbz.js";
+import { createKpfFromCbz, createKpfFromCbzBundle, planCbz } from "./cbz.js";
+import { createTaskRunner } from "./concurrency.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -87,6 +88,46 @@ describe("CBZ to KPF preparation", () => {
       jpegEncoder: "jpegli",
       cjpegliPath: join(directory, "missing-cjpegli"),
     })).rejects.toThrow("Could not start cjpegli");
+  });
+
+  it("combines multiple CBZ files in order and uses the bundle title as metadata", async () => {
+    const directory = await temporaryDirectory();
+    const first = join(directory, "001 First.cbz");
+    const second = join(directory, "002 Second.cbz");
+    const output = join(directory, "Collected Edition - 001.kpf");
+    await createCbz(first, "<ComicInfo><Title>First</Title><Writer>Bundle Author</Writer></ComicInfo>", [[800, 1200]]);
+    await createCbz(second, "<ComicInfo><Title>Second</Title></ComicInfo>", [[900, 1200], [1000, 1200]]);
+
+    const plan = await createKpfFromCbzBundle(
+      [first, second],
+      output,
+      "Collected Edition - 001",
+      { jpegEncoder: "legacy", pageTaskRunner: createTaskRunner(3) },
+    );
+
+    expect(plan.title).toBe("Collected Edition - 001");
+    expect(plan.metadata.title).toBe("Collected Edition - 001");
+    expect(plan.metadata.creators).toEqual(["Bundle Author"]);
+    expect(plan.books.map((book) => book.inputPath)).toEqual([first, second]);
+    expect(plan.outputPageCount).toBe(3);
+    const kpf = new AdmZip(output);
+    expect(kpf.getEntries().filter((entry) => /^book_\d+\.jpg$/u.test(entry.entryName))).toHaveLength(3);
+    const dimensions = await Promise.all([1, 2, 3].map(async (index) => {
+      const metadata = await sharp(kpf.getEntry(`book_${index}.jpg`)?.getData()).metadata();
+      return [metadata.width, metadata.height];
+    }));
+    expect(dimensions).toEqual([[1765, 2648], [1986, 2648], [1986, 2383]]);
+    const kcb = JSON.parse(kpf.readAsText("book.kcb")) as { metadata: { title: string } };
+    expect(kcb.metadata.title).toBe("Collected Edition - 001");
+    const databasePath = join(directory, "bundle-book.kdf");
+    await writeFile(databasePath, removeKdfFingerprints(kpf.getEntry("resources/book.kdf")!.getData()));
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    const navigation = database.prepare("SELECT payload_value FROM fragments WHERE id = 'book_navigation'").get() as { payload_value: Buffer };
+    database.close();
+    const navigationData = Buffer.from(navigation.payload_value);
+    expect(navigationData.length).toBeGreaterThan(4);
+    expect(navigationData.includes(Buffer.from("First"))).toBe(true);
+    expect(navigationData.includes(Buffer.from("Second"))).toBe(true);
   });
 });
 

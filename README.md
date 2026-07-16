@@ -25,6 +25,8 @@ For each CBZ, the tool:
 
 The original CBZ is never modified.
 
+For series and reading orders, directory input can also combine alphabetically sorted CBZ files into fixed-size bundles. Each bundle becomes one KFX whose numbered name is also used as its title metadata. Bundles include a table-of-contents entry at the first page of every source issue.
+
 ## Requirements
 
 - [Node.js](https://nodejs.org/) 22.5 or newer. Node 22.5 introduced the built-in SQLite API used to construct KPF packages.
@@ -128,6 +130,12 @@ Convert nested directories while preserving their relative directory structure:
 cbz2scribe "D:\Comics" --output "D:\Kindle Comics" --recursive
 ```
 
+Combine alphabetically sorted issues five at a time into `Saga Reading Order - 001.kfx`, `Saga Reading Order - 002.kfx`, and so on:
+
+```bash
+cbz2scribe "D:\Comics\Saga" --output "D:\Kindle Comics" --bundle-size 5 --bundle-naming "Saga Reading Order"
+```
+
 Write each KFX beside its source CBZ:
 
 ```bash
@@ -168,11 +176,13 @@ cbz2scribe manga.cbz --jpeg-encoder legacy
 | `-o, --output <directory>` | `kfx-output` | Destination directory. Relative subdirectories are preserved for directory input. |
 | `--in-place` | Off | Write `.kfx` and optional `.kpf` files beside each source CBZ. Overrides the practical use of `--output`. |
 | `--recursive` | Off | Search below nested directories. Without it, only CBZ files directly inside the input directory are processed. |
+| `--bundle-size <count>` | Off | For directory input, combine this many alphabetically sorted CBZ files into each KFX. The final partial group is retained. Requires `--bundle-naming`. |
+| `--bundle-naming <name>` | Off | Base name for bundled output and title metadata. Files are suffixed with a dash and three-digit bundle number, such as `Saga Reading Order - 001.kfx`. Requires `--bundle-size`. |
 | `--dry-run` | Off | Inspect pages, dimensions, direction, and spread detection without producing KPF/KFX files. Calibre is not required for a dry run. |
 | `--direction <auto\|ltr\|rtl>` | `auto` | Reading direction. `auto` uses `ComicInfo.xml`; absent recognized manga metadata, it uses left-to-right. |
 | `--wide-ratio <number>` | `1.125` | Treat a source image as a double-page spread when `width / height` is at least this value. |
 | `--calibre-debug <path>` | Auto-detected | Full path to Calibre's `calibre-debug` executable. |
-| `-j, --jobs <count>` | `12` | Maximum number of CBZ files prepared concurrently. Each completed KPF is then compiled through KFX Output. |
+| `-j, --jobs <count>` | `12` | Shared concurrency limit for page encoding and individual-book or bundle conversions. Use a value near the number of logical processors for MozJPEG, subject to available memory. |
 | `--keep-kpf` | Off | Keep the intermediate Kindle Publishing Format package after successful KFX compilation. Failed conversions retain their KPF for diagnosis. |
 | `--jpeg-encoder <mozjpeg\|jpegli\|legacy>` | `mozjpeg` | Select tuned MozJPEG, external Google JPEGli, or the former fast JPEG encoder. |
 | `--cjpegli <path>` | Auto-detected | Full path to `cjpegli`. Used only with `--jpeg-encoder jpegli`; otherwise checks `CJPEGLI_PATH` and then `PATH`. |
@@ -180,6 +190,12 @@ cbz2scribe manga.cbz --jpeg-encoder legacy
 | `-h, --help` | — | Show CLI help. |
 
 Existing destination KFX files with the same name are replaced. When processing multiple files, successful conversions are retained even if another input fails; the command exits non-zero and reports every failed filename at the end.
+
+Bundling is available only for directory input. All discovered CBZ files are sorted by path using natural, case-insensitive ordering before being divided into groups, so reading-order names such as `001`, `002`, and `003` remain in order. With `--recursive`, that ordering spans all discovered subdirectories. `--in-place` writes bundled files into the input directory because a bundle can contain sources from more than one subdirectory.
+
+The numbered bundle name (for example, `Saga Reading Order - 001`) replaces the title in both the generated KPF and final KFX metadata. Other bibliographic metadata is inherited from the first CBZ in that bundle. A KFX has one global reading direction, so mixed directions in one bundle are rejected; pass `--direction ltr` or `--direction rtl` when the source metadata is inconsistent.
+
+Each bundled CBZ becomes a top-level table-of-contents chapter targeting its first Kindle page. The chapter label uses the issue's `ComicInfo.xml` title after the normal reading-order-prefix handling; when ComicInfo is absent, it uses the CBZ filename without the extension.
 
 ## ComicInfo metadata
 
@@ -217,7 +233,9 @@ KFX image resources contain only the resized artwork bounds. Letterboxing is pro
 
 Page artwork is encoded by default with Sharp's built-in MozJPEG mode using progressive scans and 4:4:4 chroma sampling. JPEGli uses distance 0.8, progressive level 2, and 4:4:4 chroma. Both profiles were calibrated against the previous quality-90 JPEG encoder rather than assuming that numeric quality settings are comparable across encoders. MozJPEG needs no additional executable; JPEGli invokes a separately installed `cjpegli` process and streams each resized page through it without temporary files.
 
-An encoder-only benchmark on this project's primary Windows test PC used `cjpegli` 0.11.2 and three full comics: 82 source images producing 87 physical pages, including five split spreads. Every candidate encoded the same resized, uncompressed pixels. JPEGli's timing includes process startup and streaming for every page.
+Each MozJPEG image encode is effectively single-threaded, so the converter runs independent page encodes concurrently. `--jobs` is a shared bound across all active books and bundles; completed pages are restored to source order before KPF creation. Higher values improve CPU utilization but increase peak memory use because several decoded pages and JPEG output buffers are resident at once. On a 16-core/32-thread machine, start with `--jobs 16` and compare `--jobs 24` or `--jobs 32` if memory headroom is comfortable.
+
+An encoder-only benchmark on this project's primary Windows test PC used `cjpegli` 0.11.2 and three full comics: 82 source images producing 87 physical pages, including five split spreads. Every candidate encoded the same resized, uncompressed pixels. JPEGli's timing includes process startup and streaming for every page. These are serial encoder-comparison timings, not current CLI wall-clock times with parallel page encoding enabled.
 
 | Encoder | Page data | JPEG encode time | PSNR | Mean global SSIM |
 | --- | ---: | ---: | ---: | ---: |

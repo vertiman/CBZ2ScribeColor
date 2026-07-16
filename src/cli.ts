@@ -2,8 +2,17 @@
 import { readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { Command, Option } from "commander";
-import { createKpfFromCbz, planCbz, type ConversionPlan, type PageJpegEncoder, type ReadingDirection } from "./cbz.js";
-import { runWithConcurrency } from "./concurrency.js";
+import { groupIntoBundles } from "./bundles.js";
+import {
+  createKpfFromCbz,
+  createKpfFromCbzBundle,
+  planCbz,
+  planCbzBundle,
+  type ConversionPlan,
+  type PageJpegEncoder,
+  type ReadingDirection,
+} from "./cbz.js";
+import { createTaskRunner, runWithConcurrency } from "./concurrency.js";
 import { findCjpegli } from "./jpegli.js";
 import { compileKfx, findKfxOutput } from "./kfx-output.js";
 
@@ -20,6 +29,8 @@ interface CliOptions {
   jpegEncoder: PageJpegEncoder;
   cjpegli?: string;
   mozjpeg: boolean;
+  bundleSize?: string;
+  bundleNaming?: string;
 }
 
 const program = new Command()
@@ -33,11 +44,13 @@ const program = new Command()
   .addOption(new Option("--direction <direction>", "reading direction; auto uses ComicInfo.xml").choices(["auto", "ltr", "rtl"]).default("auto"))
   .option("--wide-ratio <ratio>", "minimum width/height ratio treated as a double-page spread", "1.125")
   .option("--calibre-debug <path>", "explicit path to calibre-debug with the KFX Output plugin")
-  .option("-j, --jobs <count>", "maximum files processed concurrently", "12")
+  .option("-j, --jobs <count>", "shared limit for concurrent page encoders and conversions", "12")
   .option("--keep-kpf", "retain the generated KPF source package", false)
   .addOption(new Option("--jpeg-encoder <encoder>", "page JPEG encoder").choices(["mozjpeg", "jpegli", "legacy"]).default("mozjpeg"))
   .option("--cjpegli <path>", "explicit path to cjpegli for --jpeg-encoder jpegli")
   .option("--no-mozjpeg", "shortcut for --jpeg-encoder legacy")
+  .option("--bundle-size <count>", "combine this many alphabetically sorted CBZ files per KFX (directory inputs only)")
+  .option("--bundle-naming <name>", "bundle output and metadata name; outputs use Name - 001, Name - 002, and so on")
   .showHelpAfterError()
   .parse();
 
@@ -62,6 +75,11 @@ async function run(inputPath: string, options: CliOptions): Promise<void> {
   const inputInfo = await stat(inputPath);
   const sources = await findCbzFiles(inputPath, inputInfo.isDirectory(), options.recursive);
   if (sources.length === 0) throw new Error("No CBZ files found");
+  const bundleSize = options.bundleSize === undefined ? undefined : positiveInteger(options.bundleSize, "bundle-size");
+  if (options.bundleNaming !== undefined && bundleSize === undefined) throw new Error("--bundle-naming requires --bundle-size");
+  if (bundleSize !== undefined && options.bundleNaming === undefined) throw new Error("--bundle-size requires --bundle-naming");
+  if (bundleSize !== undefined && !inputInfo.isDirectory()) throw new Error("--bundle-size can only be used with a directory input");
+  if (options.bundleNaming !== undefined) validateBundleName(options.bundleNaming);
 
   const calibreDebug = options.dryRun ? undefined : await findKfxOutput(options.calibreDebug);
   if (!options.dryRun && !calibreDebug) {
@@ -74,40 +92,78 @@ async function run(inputPath: string, options: CliOptions): Promise<void> {
     throw new Error("cjpegli was not found. Install Google JPEGli and put cjpegli on PATH, set CJPEGLI_PATH, or pass --cjpegli <path>.");
   }
   if (cjpegli) console.log(`Using JPEGli through: ${cjpegli}`);
-  if (!options.dryRun) console.log(`JPEG encoder: ${jpegEncoder}`);
+  if (!options.dryRun) {
+    console.log(`JPEG encoder: ${jpegEncoder}`);
+    console.log(`Parallel page encoders: ${jobs}`);
+  }
 
   const outputRoot = resolve(options.output);
   const failures: string[] = [];
-  const concurrency = Math.min(jobs, sources.length);
-  if (sources.length > 1) console.log(`Processing ${sources.length} files with up to ${concurrency} concurrent jobs`);
+  const pageTaskRunner = createTaskRunner(jobs);
+  const conversionOptions = {
+    direction: options.direction,
+    wideRatio,
+    jpegEncoder,
+    pageTaskRunner,
+    ...(cjpegli ? { cjpegliPath: cjpegli } : {}),
+  };
 
-  await runWithConcurrency(sources, concurrency, async (source, index) => {
-    const label = sources.length > 1 ? `[${index + 1}/${sources.length}] ${basename(source)}` : basename(source);
-    const kfxPath = outputPathFor(source, inputPath, inputInfo.isDirectory(), outputRoot, options.inPlace, ".kfx");
-    const kpfPath = outputPathFor(source, inputPath, inputInfo.isDirectory(), outputRoot, options.inPlace, ".kpf");
-    try {
-      const conversionOptions = {
-        direction: options.direction,
-        wideRatio,
-        jpegEncoder,
-        ...(cjpegli ? { cjpegliPath: cjpegli } : {}),
-      };
-      const plan = options.dryRun ? await planCbz(source, conversionOptions) : await createKpfFromCbz(source, kpfPath, conversionOptions);
-      printPlan(label, plan, options.dryRun);
-      if (!options.dryRun) {
-        await compileKfx(kpfPath, kfxPath, calibreDebug as string, plan.metadata);
-        console.log(`  Saved ${kfxPath}`);
-        if (!options.keepKpf) await rm(kpfPath, { force: true });
-        else console.log(`  Saved ${kpfPath}`);
+  if (bundleSize !== undefined) {
+    const bundles = groupIntoBundles(sources, bundleSize, options.bundleNaming as string);
+    const concurrency = Math.min(jobs, bundles.length);
+    console.log(`Bundling ${sources.length} alphabetically sorted files into ${bundles.length} KFX file${bundles.length === 1 ? "" : "s"} with up to ${concurrency} concurrent jobs`);
+    await runWithConcurrency(bundles, concurrency, async (bundle) => {
+      const label = bundles.length > 1 ? `[${bundle.index}/${bundles.length}] ${bundle.title}` : bundle.title;
+      const kfxPath = bundleOutputPath(inputPath, outputRoot, options.inPlace, bundle.title, ".kfx");
+      const kpfPath = bundleOutputPath(inputPath, outputRoot, options.inPlace, bundle.title, ".kpf");
+      try {
+        const plan = options.dryRun
+          ? await planCbzBundle(bundle.sources, bundle.title, conversionOptions)
+          : await createKpfFromCbzBundle(bundle.sources, kpfPath, bundle.title, conversionOptions);
+        console.log(`${label}: ${bundle.sources.length} book${bundle.sources.length === 1 ? "" : "s"}, ${plan.outputPageCount} Kindle pages, ${plan.direction.toUpperCase()}`);
+        for (const book of plan.books) printPlan(`  ${basename(book.inputPath)}`, book, options.dryRun);
+        if (!options.dryRun) {
+          await compileKfx(kpfPath, kfxPath, calibreDebug as string, plan.metadata);
+          console.log(`  Saved ${kfxPath}`);
+          if (!options.keepKpf) await rm(kpfPath, { force: true });
+          else console.log(`  Saved ${kpfPath}`);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failures.push(`${bundle.title}: ${message}`);
+        console.error(`${label}: failed: ${message}`);
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      failures.push(`${basename(source)}: ${message}`);
-      console.error(`${label}: failed: ${message}`);
-    }
-  });
+    });
+  } else {
+    const concurrency = Math.min(jobs, sources.length);
+    if (sources.length > 1) console.log(`Processing ${sources.length} files with up to ${concurrency} concurrent jobs`);
 
-  if (failures.length > 0) throw new Error(`${failures.length} file${failures.length === 1 ? "" : "s"} failed:\n- ${failures.join("\n- ")}`);
+    await runWithConcurrency(sources, concurrency, async (source, index) => {
+      const label = sources.length > 1 ? `[${index + 1}/${sources.length}] ${basename(source)}` : basename(source);
+      const kfxPath = outputPathFor(source, inputPath, inputInfo.isDirectory(), outputRoot, options.inPlace, ".kfx");
+      const kpfPath = outputPathFor(source, inputPath, inputInfo.isDirectory(), outputRoot, options.inPlace, ".kpf");
+      try {
+        const plan = options.dryRun ? await planCbz(source, conversionOptions) : await createKpfFromCbz(source, kpfPath, conversionOptions);
+        printPlan(label, plan, options.dryRun);
+        if (!options.dryRun) {
+          await compileKfx(kpfPath, kfxPath, calibreDebug as string, plan.metadata);
+          console.log(`  Saved ${kfxPath}`);
+          if (!options.keepKpf) await rm(kpfPath, { force: true });
+          else console.log(`  Saved ${kpfPath}`);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failures.push(`${basename(source)}: ${message}`);
+        console.error(`${label}: failed: ${message}`);
+      }
+    });
+  }
+
+  if (failures.length > 0) throw new Error(`${failures.length} conversion${failures.length === 1 ? "" : "s"} failed:\n- ${failures.join("\n- ")}`);
+}
+
+function bundleOutputPath(inputPath: string, outputRoot: string, inPlace: boolean, title: string, extension: string): string {
+  return join(inPlace ? inputPath : outputRoot, `${title}${extension}`);
 }
 
 async function findCbzFiles(inputPath: string, inputIsDirectory: boolean, recursive: boolean): Promise<string[]> {
@@ -168,4 +224,12 @@ function positiveInteger(value: string, label: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${label} must be a positive integer`);
   return parsed;
+}
+
+function validateBundleName(value: string): void {
+  const name = value.trim();
+  if (!name) throw new Error("bundle-naming must not be empty");
+  if (/[<>:"/\\|?*]/u.test(name) || /[. ]$/u.test(name)) {
+    throw new Error("bundle-naming must be a file name without path separators or reserved characters");
+  }
 }

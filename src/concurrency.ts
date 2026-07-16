@@ -15,3 +15,35 @@ export async function runWithConcurrency<T>(
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => runWorker()));
 }
+
+export type TaskRunner = <T>(task: () => Promise<T>) => Promise<T>;
+
+export function createTaskRunner(limit: number): TaskRunner {
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("Concurrency limit must be a positive integer");
+  let active = 0;
+  const waiting: Array<() => void> = [];
+
+  const acquire = (): Promise<void> => new Promise((resolve) => {
+    if (active < limit) {
+      active += 1;
+      resolve();
+    } else {
+      waiting.push(resolve);
+    }
+  });
+
+  const release = () => {
+    const next = waiting.shift();
+    if (next) next();
+    else active -= 1;
+  };
+
+  return async <T>(task: () => Promise<T>): Promise<T> => {
+    await acquire();
+    try {
+      return await task();
+    } finally {
+      release();
+    }
+  };
+}

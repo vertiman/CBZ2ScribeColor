@@ -23,6 +23,12 @@ export interface KpfMetadata {
   language: string;
   direction: "ltr" | "rtl";
   virtualPanels?: "off" | "horizontal" | "vertical";
+  toc?: KpfTocEntry[];
+}
+
+export interface KpfTocEntry {
+  label: string;
+  pageIndex: number;
 }
 
 interface PageInfo extends KpfPage {
@@ -64,7 +70,9 @@ const S = {
   pageTemplateType: 140,
   sectionContent: 141,
   count: 144,
+  offset: 143,
   children: 146,
+  locationId: 155,
   layoutType: 156,
   nodeType: 159,
   format: 161,
@@ -101,6 +109,14 @@ const S = {
   virtualPanelDirection: 434,
   spreadLayout: 437,
   rightToLeftBinding: 441,
+  toc: 212,
+  navType: 235,
+  navContainerName: 239,
+  navUnitName: 240,
+  representation: 241,
+  label: 244,
+  target: 246,
+  entries: 247,
   bookMetadata: 490,
   categories: 491,
   key: 492,
@@ -125,6 +141,10 @@ const S = {
   eidHashSectionMap: 610,
   sectionPidCountMap: 611,
   resourceListRef: 613,
+  bookNavigation: 389,
+  navContainer: 391,
+  navContainers: 392,
+  navUnit: 393,
   localSourceFileName: 852,
 } as const;
 
@@ -186,6 +206,19 @@ export async function createComicKpf(outputPath: string, pages: KpfPage[], metad
     })),
   }));
   const sectionIds = sections.map((section) => section.sectionId);
+  const pageContainerEids: string[] = Array(pageInfo.length);
+  for (const section of sections) {
+    for (const [imageIndex, image] of section.images.entries()) {
+      pageContainerEids[section.pageIndices[imageIndex]!] = image.containerEid;
+    }
+  }
+  const toc = (metadata.toc ?? []).map((entry) => {
+    if (!entry.label.trim()) throw new Error("KPF TOC labels must not be empty");
+    if (!Number.isSafeInteger(entry.pageIndex) || entry.pageIndex < 0 || entry.pageIndex >= pageInfo.length) {
+      throw new Error(`KPF TOC page index is out of range: ${entry.pageIndex}`);
+    }
+    return { label: entry.label.trim(), targetEid: pageContainerEids[entry.pageIndex]! };
+  });
   const resourceAuxiliaryIds = sections.flatMap((section) => section.images.map((image) => image.auxiliaryId));
   const fragments: Fragment[] = [];
   const fragmentProperties: FragmentProperty[] = [];
@@ -199,7 +232,7 @@ export async function createComicKpf(outputPath: string, pages: KpfPage[], metad
 
   addGlobal("$ion_symbol_table", buildIonSymbolTable(), "$ion_symbol_table");
   addGlobal("max_id", buildMaxId(), "max_id");
-  addGlobal("book_navigation", BVM, "book_navigation");
+  addGlobal("book_navigation", buildBookNavigation(toc), "book_navigation");
   gcFragmentProperties.push(["book_navigation", "child", "book_navigation"]);
   addGlobal("book_metadata", buildBookMetadata(metadata.language, sections[0]!.images[0]!.resourceEid, virtualPanels), "book_metadata");
   addGlobal("content_features", buildContentFeatures(virtualPanels), "content_features");
@@ -452,6 +485,24 @@ function buildResourceListAuxiliaryData(id: string, resourceIds: string[]): Buff
 
 function readingOrder(sectionIds: string[]): Buffer {
   return ionStruct([[S.readingOrderName, ionSymbol(S.default)], [S.sections, ionList(sectionIds.map(ionEidRef))]]);
+}
+
+function buildBookNavigation(entries: Array<{ label: string; targetEid: string }>): Buffer {
+  const navUnits = entries.map((entry) => ionAnnotation([S.navUnit], ionStruct([
+    [S.navUnitName, ionString(entry.label)],
+    [S.representation, ionStruct([[S.label, ionString(entry.label)]])],
+    [S.target, ionStruct([[S.locationId, ionEidRef(entry.targetEid)], [S.offset, ionInt(0)]])],
+  ])));
+  const tocContainer = ionAnnotation([S.navContainer], ionStruct([
+    [S.navType, ionSymbol(S.toc)],
+    [S.navContainerName, ionString("toc")],
+    [S.entries, ionList(navUnits)],
+  ]));
+  const navigation = ionStruct([
+    [S.readingOrderName, ionSymbol(S.default)],
+    [S.navContainers, ionList(entries.length > 0 ? [tocContainer] : [])],
+  ]);
+  return wrap(ionAnnotation([S.bookNavigation], ionList([navigation])));
 }
 
 function buildDocumentData(

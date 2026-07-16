@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runWithConcurrency } from "./concurrency.js";
+import { createTaskRunner, runWithConcurrency } from "./concurrency.js";
 
 describe("runWithConcurrency", () => {
   it("never exceeds the requested worker count", async () => {
@@ -19,5 +19,29 @@ describe("runWithConcurrency", () => {
 
   it("rejects invalid limits", async () => {
     await expect(runWithConcurrency([1], 0, async () => undefined)).rejects.toThrow("positive integer");
+  });
+});
+
+describe("createTaskRunner", () => {
+  it("shares one concurrency limit across independently submitted tasks", async () => {
+    const runTask = createTaskRunner(3);
+    let active = 0;
+    let maximum = 0;
+    const results = await Promise.all(Array.from({ length: 12 }, (_, index) => runTask(async () => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      return index;
+    })));
+
+    expect(maximum).toBe(3);
+    expect(results).toEqual(Array.from({ length: 12 }, (_, index) => index));
+  });
+
+  it("releases a slot when a task fails", async () => {
+    const runTask = createTaskRunner(1);
+    await expect(runTask(async () => { throw new Error("failure"); })).rejects.toThrow("failure");
+    await expect(runTask(async () => "recovered")).resolves.toBe("recovered");
   });
 });

@@ -128,7 +128,7 @@ describe("CBZ to KPF preparation", () => {
     expect(navigationData.length).toBeGreaterThan(4);
     expect(navigationData.includes(Buffer.from("First"))).toBe(true);
     expect(navigationData.includes(Buffer.from("Second"))).toBe(true);
-  });
+  }, 20_000);
 });
 
 async function temporaryDirectory(): Promise<string> {

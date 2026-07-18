@@ -15,6 +15,18 @@ export interface KpfPage {
   height: number;
   sourceName: string;
   spreadPair?: string;
+  panels?: KpfPanel[];
+  panelSource?: "authored" | "fallback";
+}
+
+export interface KpfPanel {
+  order: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  maskColor?: string;
+  maskOpacity?: number;
 }
 
 export interface KpfMetadata {
@@ -24,6 +36,7 @@ export interface KpfMetadata {
   direction: "ltr" | "rtl";
   virtualPanels?: "off" | "horizontal" | "vertical";
   toc?: KpfTocEntry[];
+  includeAuthoringSources?: boolean;
 }
 
 export interface KpfTocEntry {
@@ -42,6 +55,17 @@ interface ImageIds {
   resourceEid: string;
   resourceId: string;
   auxiliaryId: string;
+  panels: PanelIds[];
+}
+
+interface PanelIds {
+  activationEid: string;
+  targetEid: string;
+  maskEid: string;
+  viewportEid: string;
+  leafEid: string;
+  styleId: string;
+  backdropStyleId: string;
 }
 
 interface SectionIds {
@@ -65,6 +89,10 @@ const S = {
   backgroundColor: 21,
   width: 56,
   height: 57,
+  top: 58,
+  left: 59,
+  fillColor: 70,
+  fillOpacity: 72,
   pageWidth: 66,
   pageHeight: 67,
   pageTemplateType: 140,
@@ -74,13 +102,16 @@ const S = {
   children: 146,
   locationId: 155,
   layoutType: 156,
+  style: 157,
   nodeType: 159,
   format: 161,
   externalResource: 164,
+  actionTarget: 163,
   location: 165,
   readingOrders: 169,
   sections: 170,
   sectionId: 174,
+  styleName: 173,
   resourceId: 175,
   storylineId: 176,
   readingOrderName: 178,
@@ -108,7 +139,12 @@ const S = {
   imageHeight: 423,
   virtualPanelDirection: 434,
   spreadLayout: 437,
+  zoomTarget: 439,
   rightToLeftBinding: 441,
+  activate: 426,
+  ordinal: 427,
+  action: 428,
+  backdropStyle: 429,
   toc: 212,
   navType: 235,
   navContainerName: 239,
@@ -146,6 +182,10 @@ const S = {
   navContainers: 392,
   navUnit: 393,
   localSourceFileName: 852,
+  percent: 314,
+  zoomIn: 468,
+  source: 474,
+  overflow: 476,
 } as const;
 
 const LOCAL_SYMBOLS = [
@@ -180,7 +220,7 @@ export async function createComicKpf(outputPath: string, pages: KpfPage[], metad
   for (let index = 0; index < pageInfo.length;) {
     const current = pageInfo[index];
     const next = pageInfo[index + 1];
-    if (current?.spreadPair && next?.spreadPair === current.spreadPair) {
+    if (current?.spreadPair && !current.panels?.length && !next?.panels?.length && next?.spreadPair === current.spreadPair) {
       groups.push([index, index + 1]);
       index += 2;
     } else {
@@ -197,12 +237,21 @@ export async function createComicKpf(outputPath: string, pages: KpfPage[], metad
     sectionId: ids.next("c"),
     structureEid: ids.next("t"),
     storylineId: ids.next("l"),
-    images: pageIndices.map(() => ({
+    images: pageIndices.map((pageIndex) => ({
       containerEid: ids.next("i"),
       leafEid: ids.next("i"),
       resourceEid: ids.next("e"),
       resourceId: ids.next("rsrc"),
       auxiliaryId: ids.next("d"),
+      panels: (pageInfo[pageIndex]!.panels ?? []).map(() => ({
+        activationEid: ids.next("i"),
+        targetEid: ids.next("i"),
+        maskEid: ids.next("i"),
+        viewportEid: ids.next("i"),
+        leafEid: ids.next("i"),
+        styleId: ids.next("s"),
+        backdropStyleId: ids.next("s"),
+      })),
     })),
   }));
   const sectionIds = sections.map((section) => section.sectionId);
@@ -267,9 +316,12 @@ export async function createComicKpf(outputPath: string, pages: KpfPage[], metad
     gcReachable.add(`${sid}-ad`);
 
     const positionMapId = `${sid}-spm`;
-    fragments.push([positionMapId, "blob", section.facing
-      ? buildFacingSectionPositionIdMap(sid, section.structureEid, section.images)
-      : buildSectionPositionIdMap(sid, section.structureEid, section.images[0]!.containerEid, section.images[0]!.leafEid)]);
+    const positionEids = [section.structureEid, ...section.images.flatMap((image) => [
+      image.containerEid,
+      image.leafEid,
+      ...image.panels.flatMap((panel) => [panel.activationEid, panel.targetEid, panel.maskEid, panel.viewportEid, panel.leafEid]),
+    ])];
+    fragments.push([positionMapId, "blob", buildSectionPositionIdMap(sid, positionEids)]);
     fragmentProperties.push([positionMapId, "element_type", "section_position_id_map"]);
     gcReachable.add(positionMapId);
 
@@ -287,10 +339,12 @@ export async function createComicKpf(outputPath: string, pages: KpfPage[], metad
       const info = infos[imageIndex]!;
       const displayWidth = displayWidths[imageIndex]!;
       const displayHeight = displayHeights[imageIndex]!;
+      const structureChildren = [image.leafEid, ...image.panels.flatMap((panel) => [panel.activationEid, panel.targetEid])];
       fragments.push([image.containerEid, "blob", section.facing
         ? buildFacingStructureContainer(image.containerEid, displayWidth, displayHeight, image.leafEid)
-        : buildStructureContainer(image.containerEid, displayWidth, displayHeight, image.leafEid)]);
-      fragmentProperties.push([image.containerEid, "element_type", "structure"], [image.containerEid, "child", image.leafEid]);
+        : buildStructureContainer(image.containerEid, displayWidth, displayHeight, structureChildren)]);
+      fragmentProperties.push([image.containerEid, "element_type", "structure"]);
+      for (const child of structureChildren) fragmentProperties.push([image.containerEid, "child", child]);
       gcReachable.add(image.containerEid);
       fragments.push([image.leafEid, "blob", buildStructureLeaf(image.leafEid, displayWidth, displayHeight, image.resourceEid)]);
       fragmentProperties.push([image.leafEid, "element_type", "structure"], [image.leafEid, "child", image.resourceEid]);
@@ -305,6 +359,34 @@ export async function createComicKpf(outputPath: string, pages: KpfPage[], metad
       fragmentProperties.push([image.auxiliaryId, "element_type", "auxiliary_data"]);
       gcReachable.add(image.auxiliaryId);
       eidSectionMap.push([image.containerEid, sid], [image.leafEid, sid]);
+
+      for (const [panelIndex, panelIds] of image.panels.entries()) {
+        const panel = info.panels![panelIndex]!;
+        fragments.push([panelIds.activationEid, "blob", buildPanelActivation(panelIds.activationEid, panelIds.targetEid, panel, displayWidth, displayHeight)]);
+        fragmentProperties.push([panelIds.activationEid, "element_type", "structure"]);
+        gcReachable.add(panelIds.activationEid);
+
+        fragments.push([panelIds.styleId, "blob", buildPanelStyle(panelIds.styleId, panel)]);
+        fragmentProperties.push([panelIds.styleId, "element_type", "style"]);
+        gcReachable.add(panelIds.styleId);
+        fragments.push([panelIds.backdropStyleId, "blob", buildPanelStyle(panelIds.backdropStyleId, panel)]);
+        fragmentProperties.push([panelIds.backdropStyleId, "element_type", "style"]);
+        gcReachable.add(panelIds.backdropStyleId);
+
+        fragments.push([panelIds.targetEid, "blob", buildPanelTarget(panelIds.targetEid, panelIds.maskEid, panelIds.viewportEid)]);
+        fragmentProperties.push([panelIds.targetEid, "element_type", "structure"], [panelIds.targetEid, "child", panelIds.maskEid], [panelIds.targetEid, "child", panelIds.viewportEid]);
+        gcReachable.add(panelIds.targetEid);
+        fragments.push([panelIds.maskEid, "blob", buildPanelMask(panelIds.maskEid, panelIds.styleId, panelIds.backdropStyleId)]);
+        fragmentProperties.push([panelIds.maskEid, "element_type", "structure"]);
+        gcReachable.add(panelIds.maskEid);
+        fragments.push([panelIds.viewportEid, "blob", buildPanelViewport(panelIds.viewportEid, panelIds.leafEid, panel, displayWidth, displayHeight)]);
+        fragmentProperties.push([panelIds.viewportEid, "element_type", "structure"], [panelIds.viewportEid, "child", panelIds.leafEid]);
+        gcReachable.add(panelIds.viewportEid);
+        fragments.push([panelIds.leafEid, "blob", buildPanelImage(panelIds.leafEid, image.resourceEid, panel, displayWidth, displayHeight)]);
+        fragmentProperties.push([panelIds.leafEid, "element_type", "structure"], [panelIds.leafEid, "child", image.resourceEid]);
+        gcReachable.add(panelIds.leafEid);
+        eidSectionMap.push([panelIds.activationEid, sid], [panelIds.targetEid, sid], [panelIds.maskEid, sid], [panelIds.viewportEid, sid], [panelIds.leafEid, sid]);
+      }
     }
     eidSectionMap.push([sid, sid], [section.structureEid, sid]);
   }
@@ -315,7 +397,10 @@ export async function createComicKpf(outputPath: string, pages: KpfPage[], metad
     const entries = eidSectionMap.filter(([eid]) => eidHashBucket(eid, bucketCount) === bucketIndex);
     addGlobal(id, buildEidHashBucket(bucketIndex, entries), "yj.eidhash_eid_section_map");
   }
-  addGlobal("yj.section_pid_count_map", buildSectionPidCountMap(sections.map((section) => [section.sectionId, section.facing ? 5 : 3])), "yj.section_pid_count_map");
+  addGlobal("yj.section_pid_count_map", buildSectionPidCountMap(sections.map((section) => [
+    section.sectionId,
+    1 + section.images.reduce((count, image) => count + 2 + image.panels.length * 5, 0),
+  ])), "yj.section_pid_count_map");
 
   const workDirectory = join(tmpdir(), `kindle-kpf-${randomUUID()}`);
   const databasePath = join(workDirectory, "book.kdf");
@@ -343,7 +428,11 @@ export async function createComicKpf(outputPath: string, pages: KpfPage[], metad
     const zip = new AdmZip();
     const hashes: Record<string, string> = {};
     const add = (name: string, data: Buffer) => {
-      zip.addFile(name, data);
+      const entry = zip.addFile(name, data);
+      // KPF resources are already compressed JPEGs or compact binary metadata.
+      // Storing them avoids a long, single-threaded and effectively fruitless
+      // second compression pass in AdmZip.
+      entry.header.method = 0;
       hashes[name] = md5(data);
     };
     add("resources/book.kdf", kdfData);
@@ -352,7 +441,9 @@ export async function createComicKpf(outputPath: string, pages: KpfPage[], metad
     for (const section of sections) {
       for (const [imageIndex, image] of section.images.entries()) add(`resources/res/${image.resourceId}`, pageInfo[section.pageIndices[imageIndex]!]!.data);
     }
-    for (const [index, page] of pageInfo.entries()) add(`book_${index + 1}.jpg`, page.data);
+    if (metadata.includeAuthoringSources !== false) {
+      for (const [index, page] of pageInfo.entries()) add(`book_${index + 1}.jpg`, page.data);
+    }
     const now = new Date().toUTCString();
     add("action.log", Buffer.from(`[${now}][INFO] [Action] EE NewBook\n[${now}][INFO] [Action] EE ZoomPage\n[${now}][INFO] [Action] E SaveBook - SaveforExport\n`));
     zip.addFile("book.kcb", Buffer.from(JSON.stringify({
@@ -414,18 +505,10 @@ function buildSection(
   return wrap(ionAnnotation([S.section], ionStruct([[S.sectionId, ionEidRef(sectionId)], [S.sectionContent, ionList([structure])]])));
 }
 
-function buildSectionPositionIdMap(sectionId: string, structureEid: string, containerEid: string, leafEid: string): Buffer {
+function buildSectionPositionIdMap(sectionId: string, eids: string[]): Buffer {
   return wrap(ionAnnotation([S.sectionPositionIdMap], ionStruct([
     [S.sectionId, ionEidRef(sectionId)],
-    [S.positionMap, ionList([[structureEid, 1], [containerEid, 2], [leafEid, 3]].map(([eid, index]) => ionList([ionInt(index as number), ionEidRef(eid as string)])))],
-  ])));
-}
-
-function buildFacingSectionPositionIdMap(sectionId: string, structureEid: string, images: ImageIds[]): Buffer {
-  const ids = [structureEid, images[0]!.containerEid, images[0]!.leafEid, images[1]!.containerEid, images[1]!.leafEid];
-  return wrap(ionAnnotation([S.sectionPositionIdMap], ionStruct([
-    [S.sectionId, ionEidRef(sectionId)],
-    [S.positionMap, ionList(ids.map((eid, index) => ionList([ionInt(index + 1), ionEidRef(eid)])))],
+    [S.positionMap, ionList(eids.map((eid, index) => ionList([ionInt(index + 1), ionEidRef(eid)])))],
   ])));
 }
 
@@ -433,11 +516,74 @@ function buildStoryline(storylineId: string, containerEids: string[]): Buffer {
   return wrap(ionAnnotation([S.storyline], ionStruct([[S.storylineId, ionEidRef(storylineId)], [S.children, ionList(containerEids.map(ionEidRef))]])));
 }
 
-function buildStructureContainer(eid: string, width: number, height: number, childEid: string): Buffer {
+function buildStructureContainer(eid: string, width: number, height: number, childEids: string[]): Buffer {
   return wrap(ionAnnotation([S.structure], ionStruct([
     [S.selfRef, ionEidRef(eid)], [S.width, ionInt(width)], [S.height, ionInt(height)], [S.positionType, ionSymbol(S.absolute)],
     [S.layoutType, ionSymbol(S.block)], [S.nodeType, ionSymbol(S.container)], [S.backgroundColor, ionInt(0xff000000)],
-    [S.children, ionList([ionEidRef(childEid)])],
+    [S.children, ionList(childEids.map(ionEidRef))],
+  ])));
+}
+
+function buildPanelActivation(eid: string, targetEid: string, panel: KpfPanel, pageWidth: number, pageHeight: number): Buffer {
+  return wrap(ionAnnotation([S.structure], ionStruct([
+    [S.selfRef, ionEidRef(eid)], [S.positionType, ionSymbol(S.absolute)], [S.fitType, ionSymbol(S.fitBoth)],
+    [S.width, ionFloat(panel.width * pageWidth)], [S.height, ionFloat(panel.height * pageHeight)],
+    [S.top, ionFloat(panel.y * pageHeight)], [S.left, ionFloat(panel.x * pageWidth)],
+    [S.activate, ionList([ionStruct([[S.source, ionEidRef(eid)], [S.actionTarget, ionEidRef(targetEid)], [S.action, ionSymbol(S.zoomIn)]])])],
+    [S.ordinal, ionInt(panel.order)], [S.nodeType, ionSymbol(S.container)],
+  ])));
+}
+
+function buildPanelTarget(eid: string, maskEid: string, viewportEid: string): Buffer {
+  return wrap(ionAnnotation([S.structure], ionStruct([
+    [S.selfRef, ionEidRef(eid)], [S.width, ionPercent(100)], [S.height, ionPercent(100)],
+    [S.positionType, ionSymbol(S.absolute)], [S.nodeType, ionSymbol(S.zoomTarget)], [S.fitType, ionSymbol(S.fitBoth)],
+    [S.children, ionList([ionEidRef(maskEid), ionEidRef(viewportEid)])],
+  ])));
+}
+
+function buildPanelMask(eid: string, styleId: string, backdropStyleId: string): Buffer {
+  return wrap(ionAnnotation([S.structure], ionStruct([
+    [S.selfRef, ionEidRef(eid)], [S.width, ionPercent(100)], [S.height, ionPercent(100)],
+    [S.top, ionPercent(0)], [S.left, ionPercent(0)], [S.style, ionEidRef(styleId)],
+    [S.backdropStyle, ionEidRef(backdropStyleId)], [S.nodeType, ionSymbol(S.container)],
+  ])));
+}
+
+function panelViewport(panel: KpfPanel, pageWidth: number, pageHeight: number): { width: number; height: number; top: number; left: number; scale: number } {
+  const panelWidth = Math.max(1, panel.width * pageWidth);
+  const panelHeight = Math.max(1, panel.height * pageHeight);
+  const panelAspect = panelWidth / panelHeight;
+  const pageAspect = pageWidth / pageHeight;
+  const width = panelAspect >= pageAspect ? pageWidth : pageHeight * panelAspect;
+  const height = panelAspect >= pageAspect ? pageWidth / panelAspect : pageHeight;
+  return { width, height, top: (pageHeight - height) / 2, left: (pageWidth - width) / 2, scale: width / panelWidth };
+}
+
+function buildPanelViewport(eid: string, childEid: string, panel: KpfPanel, pageWidth: number, pageHeight: number): Buffer {
+  const viewport = panelViewport(panel, pageWidth, pageHeight);
+  return wrap(ionAnnotation([S.structure], ionStruct([
+    [S.selfRef, ionEidRef(eid)], [S.positionType, ionSymbol(S.absolute)], [S.fitType, ionSymbol(S.fitBoth)],
+    [S.width, ionFloat(viewport.width)], [S.height, ionFloat(viewport.height)], [S.top, ionFloat(viewport.top)], [S.left, ionFloat(viewport.left)],
+    [S.overflow, ionBool(true)], [S.nodeType, ionSymbol(S.container)], [S.children, ionList([ionEidRef(childEid)])],
+  ])));
+}
+
+function buildPanelImage(eid: string, resourceEid: string, panel: KpfPanel, pageWidth: number, pageHeight: number): Buffer {
+  const { scale } = panelViewport(panel, pageWidth, pageHeight);
+  return wrap(ionAnnotation([S.structure], ionStruct([
+    [S.selfRef, ionEidRef(eid)], [S.positionType, ionSymbol(S.absolute)], [S.fitType, ionSymbol(S.fitBoth)],
+    [S.width, ionFloat(pageWidth * scale)], [S.height, ionFloat(pageHeight * scale)],
+    [S.top, ionFloat(-panel.y * pageHeight * scale)], [S.left, ionFloat(-panel.x * pageWidth * scale)],
+    [S.nodeType, ionSymbol(S.leaf)], [S.resourceId, ionEidRef(resourceEid)],
+  ])));
+}
+
+function buildPanelStyle(id: string, panel: KpfPanel): Buffer {
+  const color = /^#[0-9a-f]{6}$/iu.test(panel.maskColor ?? "") ? Number.parseInt(panel.maskColor!.slice(1), 16) : 0;
+  const opacity = Number.isFinite(panel.maskOpacity) ? Math.max(0, Math.min(1, panel.maskOpacity!)) : 1;
+  return wrap(ionAnnotation([S.style], ionStruct([
+    [S.fillOpacity, ionFloat(opacity)], [S.styleName, ionEidRef(id)], [S.fillColor, ionInt(color)],
   ])));
 }
 
@@ -587,6 +733,14 @@ function ionFloat(value: number): Buffer {
   buffer[0] = 0x48;
   buffer.writeDoubleBE(value, 1);
   return buffer;
+}
+
+function ionBool(value: boolean): Buffer {
+  return Buffer.from([value ? 0x11 : 0x10]);
+}
+
+function ionPercent(value: number): Buffer {
+  return ionStruct([[S.value, ionFloat(value)], [306, ionSymbol(S.percent)]]);
 }
 
 function ionSymbol(id: number): Buffer {

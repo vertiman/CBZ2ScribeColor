@@ -129,6 +129,31 @@ describe("CBZ to KPF preparation", () => {
     expect(navigationData.includes(Buffer.from("First"))).toBe(true);
     expect(navigationData.includes(Buffer.from("Second"))).toBe(true);
   }, 20_000);
+
+  it("writes PanelView sidecars as native publisher panels", async () => {
+    const directory = await temporaryDirectory();
+    const input = join(directory, "Guided.cbz");
+    const output = join(directory, "Guided.kpf");
+    await createCbz(input, "<ComicInfo><Title>Guided</Title></ComicInfo>", [[600, 900]], [[
+      { order: 1, x: 0.1, y: 0.2, width: 0.3, height: 0.4, maskColor: "#123456", maskOpacity: 0.8 },
+    ]]);
+
+    const plan = await createKpfFromCbzBundle([input], output, "Guided Bundle", { jpegEncoder: "legacy" });
+
+    expect(plan.authoredPanelCount).toBe(1);
+    expect(plan.fallbackPageCount).toBe(0);
+    const kpf = new AdmZip(output);
+    const kcb = JSON.parse(kpf.readAsText("book.kcb")) as { book_state: { book_reading_option: number } };
+    expect(kcb.book_state.book_reading_option).toBe(1);
+    const databasePath = join(directory, "guided-book.kdf");
+    await writeFile(databasePath, removeKdfFingerprints(kpf.getEntry("resources/book.kdf")!.getData()));
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    const structures = database.prepare("SELECT count(*) AS count FROM fragment_properties WHERE key = 'element_type' AND value = 'structure'").get() as { count: number };
+    const styles = database.prepare("SELECT count(*) AS count FROM fragment_properties WHERE key = 'element_type' AND value = 'style'").get() as { count: number };
+    database.close();
+    expect(structures.count).toBe(7);
+    expect(styles.count).toBe(2);
+  });
 });
 
 async function temporaryDirectory(): Promise<string> {
@@ -137,12 +162,21 @@ async function temporaryDirectory(): Promise<string> {
   return path;
 }
 
-async function createCbz(path: string, comicInfo: string | undefined, dimensions: Array<[number, number]>): Promise<void> {
+async function createCbz(
+  path: string,
+  comicInfo: string | undefined,
+  dimensions: Array<[number, number]>,
+  panels?: unknown[][],
+): Promise<void> {
   const zip = new AdmZip();
   for (const [zeroIndex, [width, height]] of dimensions.entries()) {
     zip.addFile(`${String(zeroIndex + 1).padStart(3, "0")}.png`, await sharp({ create: { width, height, channels: 3, background: "white" } }).png().toBuffer());
   }
   if (comicInfo) zip.addFile("ComicInfo.xml", Buffer.from(comicInfo));
+  if (panels) zip.addFile("PanelView.json", Buffer.from(JSON.stringify({
+    version: 1,
+    pages: panels.map((pagePanels, index) => ({ image: `${String(index + 1).padStart(3, "0")}.png`, panels: pagePanels })),
+  })));
   await new Promise<void>((resolvePromise, reject) => zip.writeZip(path, (error) => error ? reject(error) : resolvePromise()));
 }
 

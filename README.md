@@ -4,6 +4,8 @@ CBZ2ScribeColor converts CBZ comic archives into sideloadable KFX books tuned fo
 
 Four-corner navigation uses Kindle's own synthetic Virtual Panels feature.
 
+Library callers can instead supply CBZ files containing a version-1 `PanelView.json` sidecar. In that path the converter transforms ordered normalized rectangles through resizing and spread splitting, writes native Kindle publisher-panel activation and zoom-target fragments (including mask color/opacity), and uses an explicit four-panel fallback only on pages without authored rectangles. The exported `convertCbzBundleToKfx()` API compiles this authored KPF directly through Calibre's KFX Output plugin. Bundle image preparation runs through a bounded parallel Sharp/libvips pipeline while preserving issue and page order.
+
 > [!IMPORTANT]
 > This is an unofficial, independently developed tool. KPF and KFX are undocumented Amazon formats and may change. Test generated books on your own Kindle. Only convert material you have the right to use.
 

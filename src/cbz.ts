@@ -4,7 +4,7 @@ import AdmZip from "adm-zip";
 import sharp from "sharp";
 import type { TaskRunner } from "./concurrency.js";
 import { encodeJpegli } from "./jpegli.js";
-import { createComicKpf, type KpfPage, type KpfTocEntry } from "./kindle-kpf.js";
+import { createComicKpf, type KpfPage, type KpfPanel, type KpfTocEntry } from "./kindle-kpf.js";
 
 export const SCRIBE_COLORSOFT_WIDTH = 1986;
 export const SCRIBE_COLORSOFT_HEIGHT = 2648;
@@ -18,6 +18,7 @@ export interface CbzOptions {
   jpegEncoder?: PageJpegEncoder;
   cjpegliPath?: string;
   pageTaskRunner?: TaskRunner;
+  includeAuthoringSources?: boolean;
 }
 
 export interface BookMetadata {
@@ -61,6 +62,9 @@ export interface BundleConversionPlan {
   direction: ReadingDirection;
   books: ConversionPlan[];
   outputPageCount: number;
+  pageCount: number;
+  authoredPanelCount: number;
+  fallbackPageCount: number;
   metadata: BookMetadata;
 }
 
@@ -68,6 +72,7 @@ interface Inspection {
   plan: ConversionPlan;
   metadata: BookMetadata;
   imageEntries: AdmZip.IZipEntry[];
+  sidecarPanels?: KpfPanel[][];
 }
 
 interface Bounds {
@@ -113,6 +118,8 @@ export async function createKpfFromCbz(
     creators: inspection.metadata.creators,
     language: inspection.metadata.language,
     direction: inspection.metadata.direction,
+    virtualPanels: pages.every((page) => page.panels?.length) ? "off" : "horizontal",
+    ...(options.includeAuthoringSources === undefined ? {} : { includeAuthoringSources: options.includeAuthoringSources }),
   });
   return inspection.plan;
 }
@@ -138,9 +145,11 @@ export async function createKpfFromCbzBundle(
   }
   const pages: KpfPage[] = [];
   const toc: KpfTocEntry[] = [];
+  const preparedBooks = await Promise.all(bundle.inspections.map((inspection) =>
+    preparePages(inspection, jpegEncoder, options.cjpegliPath, options.pageTaskRunner)));
   for (const [bookIndex, inspection] of bundle.inspections.entries()) {
     toc.push({ label: inspection.plan.title, pageIndex: pages.length });
-    const bookPages = await preparePages(inspection, jpegEncoder, options.cjpegliPath, options.pageTaskRunner);
+    const bookPages = preparedBooks[bookIndex]!;
     for (const page of bookPages) {
       pages.push({
         ...page,
@@ -156,8 +165,12 @@ export async function createKpfFromCbzBundle(
     creators: bundle.plan.metadata.creators,
     language: bundle.plan.metadata.language,
     direction: bundle.plan.direction,
+    virtualPanels: pages.every((page) => page.panels?.length) ? "off" : "horizontal",
+    ...(options.includeAuthoringSources === undefined ? {} : { includeAuthoringSources: options.includeAuthoringSources }),
     toc,
   });
+  bundle.plan.authoredPanelCount = pages.filter((page) => page.panelSource === "authored").reduce((sum, page) => sum + (page.panels?.length ?? 0), 0);
+  bundle.plan.fallbackPageCount = pages.filter((page) => page.panelSource === "fallback").length;
   return bundle.plan;
 }
 
@@ -185,6 +198,9 @@ async function inspectCbzBundle(
       direction,
       books: inspections.map((inspection) => inspection.plan),
       outputPageCount: inspections.reduce((total, inspection) => total + inspection.plan.outputPageCount, 0),
+      pageCount: inspections.reduce((total, inspection) => total + inspection.plan.outputPageCount, 0),
+      authoredPanelCount: 0,
+      fallbackPageCount: 0,
       metadata,
     },
     inspections,
@@ -203,6 +219,7 @@ async function inspectCbz(inputPath: string, options: CbzOptions): Promise<Inspe
   if (imageEntries.length === 0) throw new Error(`${basename(inputPath)} contains no supported images`);
 
   const comicInfo = entries.find((entry) => basename(entry.entryName).toLowerCase() === "comicinfo.xml")?.getData();
+  const panelView = entries.find((entry) => basename(entry.entryName).toLowerCase() === "panelview.json")?.getData();
   const fallbackTitle = basename(inputPath, extname(inputPath));
   const metadata = parseComicInfo(comicInfo?.toString("utf8") ?? "", fallbackTitle);
   const direction = options.direction && options.direction !== "auto" ? options.direction : metadata.direction;
@@ -225,6 +242,8 @@ async function inspectCbz(inputPath: string, options: CbzOptions): Promise<Inspe
     });
   }
 
+  const sidecarPanels = panelView ? parsePanelView(panelView.toString("utf8"), imageEntries.length) : undefined;
+
   const nativeMetadata = { ...metadata, direction };
   return {
     plan: {
@@ -241,6 +260,7 @@ async function inspectCbz(inputPath: string, options: CbzOptions): Promise<Inspe
     },
     metadata: nativeMetadata,
     imageEntries,
+    ...(sidecarPanels ? { sidecarPanels } : {}),
   };
 }
 
@@ -275,6 +295,7 @@ async function prepareSourcePage(
   const entry = inspection.imageEntries[sourceIndex];
   if (!entry) throw new Error(`Missing source image ${source.sourceName}`);
   const pipeline = sharp(entry.getData(), { animated: false }).rotate().flatten({ background: PAGE_BACKGROUND });
+  const sourcePanels = inspection.sidecarPanels?.[sourceIndex];
 
   if (!source.doublePage) {
     const bounds = containBounds(source.width, source.height);
@@ -287,6 +308,7 @@ async function prepareSourcePage(
       width: bounds.width,
       height: bounds.height,
       sourceName: source.sourceName,
+      ...(sourcePanels ? panelFields(sourcePanels, inspection.plan.direction) : {}),
     }];
   }
 
@@ -317,9 +339,59 @@ async function prepareSourcePage(
       height: bounds.height,
       sourceName: `${source.sourceName}#${half.side}`,
       spreadPair,
+      ...(sourcePanels ? panelFields(panelsForHalf(sourcePanels, half.left / source.width, half.width / source.width), inspection.plan.direction) : {}),
     });
   }
   return pages;
+}
+
+function panelFields(panels: KpfPanel[], direction: ReadingDirection): Pick<KpfPage, "panels" | "panelSource"> {
+  const authored = validatePanels(panels);
+  return authored.length > 0
+    ? { panels: authored, panelSource: "authored" }
+    : { panels: quadrantPanels(direction), panelSource: "fallback" };
+}
+
+function parsePanelView(source: string, imageCount: number): KpfPanel[][] {
+  const value = JSON.parse(source) as { version?: number; pages?: Array<{ panels?: KpfPanel[] }> };
+  if (value.version !== 1 || !Array.isArray(value.pages) || value.pages.length !== imageCount) {
+    throw new Error(`PanelView.json must be version 1 with ${imageCount} pages`);
+  }
+  return value.pages.map((page) => validatePanels(page.panels ?? []));
+}
+
+function validatePanels(panels: KpfPanel[]): KpfPanel[] {
+  return panels.filter((panel) => Number.isFinite(panel.x) && Number.isFinite(panel.y)
+    && Number.isFinite(panel.width) && Number.isFinite(panel.height)
+    && panel.x >= 0 && panel.y >= 0 && panel.width > 0 && panel.height > 0
+    && panel.x + panel.width <= 1.000001 && panel.y + panel.height <= 1.000001)
+    .sort((a, b) => a.order - b.order)
+    .map((panel, index) => ({
+      ...panel,
+      order: index + 1,
+      maskColor: /^#[0-9a-f]{6}$/iu.test(panel.maskColor ?? "") ? panel.maskColor! : "#000000",
+      maskOpacity: Number.isFinite(panel.maskOpacity) ? Math.max(0, Math.min(1, panel.maskOpacity!)) : 1,
+    }));
+}
+
+function panelsForHalf(panels: KpfPanel[], halfX: number, halfWidth: number): KpfPanel[] {
+  const right = halfX + halfWidth;
+  return panels.flatMap((panel): KpfPanel[] => {
+    const left = Math.max(panel.x, halfX);
+    const clippedRight = Math.min(panel.x + panel.width, right);
+    if (clippedRight - left <= 0.002) return [];
+    return [{ ...panel, x: (left - halfX) / halfWidth, width: (clippedRight - left) / halfWidth }];
+  }).map((panel, index) => ({ ...panel, order: index + 1 }));
+}
+
+function quadrantPanels(direction: ReadingDirection): KpfPanel[] {
+  const xs = direction === "rtl" ? [0.5, 0] : [0, 0.5];
+  return [
+    { order: 1, x: xs[0]!, y: 0, width: 0.5, height: 0.5, maskColor: "#000000", maskOpacity: 1 },
+    { order: 2, x: xs[1]!, y: 0, width: 0.5, height: 0.5, maskColor: "#000000", maskOpacity: 1 },
+    { order: 3, x: xs[0]!, y: 0.5, width: 0.5, height: 0.5, maskColor: "#000000", maskOpacity: 1 },
+    { order: 4, x: xs[1]!, y: 0.5, width: 0.5, height: 0.5, maskColor: "#000000", maskOpacity: 1 },
+  ];
 }
 
 async function encodePage(
